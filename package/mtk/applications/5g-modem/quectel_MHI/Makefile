@@ -30,6 +30,7 @@ MAKE_OPTS:= \
 	ARCH="$(LINUX_KARCH)" \
 	CROSS_COMPILE="$(TARGET_CROSS)" \
 	CXXFLAGS="$(TARGET_CXXFLAGS)" \
+	EXTRA_CFLAGS="-Wno-error=incompatible-pointer-types" \
 	M="$(PKG_BUILD_DIR)" \
 	$(EXTRA_KCONFIG)
 

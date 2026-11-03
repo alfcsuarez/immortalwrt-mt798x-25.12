@@ -15,6 +15,11 @@
 #include <linux/uaccess.h>
 #include <asm/uaccess.h>
 #include <linux/version.h>
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0))
+#ifndef no_llseek
+#define no_llseek noop_llseek
+#endif
+#endif
 #if (LINUX_VERSION_CODE > KERNEL_VERSION( 4,11,0 ))
 #include <linux/sched/signal.h>
 #else
@@ -2366,7 +2371,11 @@ void mhi_unprepare_after_power_down(struct mhi_controller *mhi_cntrl)
 }
 
 /* match dev to drv */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))
+static int mhi_match(struct device *dev, const struct device_driver *drv)
+#else
 static int mhi_match(struct device *dev, struct device_driver *drv)
+#endif
 {
 	struct mhi_device *mhi_dev = to_mhi_device(dev);
 	struct mhi_driver *mhi_drv = to_mhi_driver(drv);
