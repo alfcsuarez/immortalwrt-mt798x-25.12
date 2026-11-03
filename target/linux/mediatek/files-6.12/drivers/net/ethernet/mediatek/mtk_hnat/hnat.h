@@ -1601,6 +1601,7 @@ void hnat_vif_acct_update(struct mtk_hnat *h, u32 ppe_id, u32 index,
 			  u64 bytes, u64 packets);
 
 #include "hnat_account.h"
+#include "hnat_diag.h"
 
 int hnat_mcast_foe_bind_handle(const u8 *dmac,
 			       u32 ppe_id, u32 foe_idx, struct foe_entry *entry, int ifindex);
