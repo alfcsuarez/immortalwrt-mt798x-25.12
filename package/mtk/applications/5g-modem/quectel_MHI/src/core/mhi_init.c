@@ -15,11 +15,7 @@
 #include <linux/uaccess.h>
 #include <asm/uaccess.h>
 #include <linux/version.h>
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0))
-#ifndef no_llseek
-#define no_llseek noop_llseek
-#endif
-#endif
+#include <linux/fs.h>
 #if (LINUX_VERSION_CODE > KERNEL_VERSION( 4,11,0 ))
 #include <linux/sched/signal.h>
 #else
@@ -649,7 +645,7 @@ static int mon_text_release(struct inode *inode, struct file *file)
 static const struct file_operations mon_fops_text_u = {
 	.owner =	THIS_MODULE,
 	.open =		mon_text_open,
-	.llseek =	no_llseek,
+	.llseek =	noop_llseek,
 	.read =		mon_text_read_u,
 	.release =	mon_text_release,
 };

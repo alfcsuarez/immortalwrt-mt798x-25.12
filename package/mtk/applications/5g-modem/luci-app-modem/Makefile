@@ -21,9 +21,7 @@ LUCI_DEPENDS:=+luci-compat \
 		+kmod-usb-net-rndis \
 		+kmod-usb-net-cdc-ncm \
 		+usbutils \
-		+kmod-pcie_mhi \
 		+pciutils \
-		+quectel-CM-5G \
 		+sms-tool \
 		+bc +jq +rdisc6 +ndisc6
 
