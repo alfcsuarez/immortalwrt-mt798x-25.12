@@ -1,0 +1,65 @@
+--- a/mt_wifi/os/linux/cfg80211/cfg80211drv.c	2026-11-03 19:20:11.582949571 +0100
++++ b/mt_wifi/os/linux/cfg80211/cfg80211drv.c	2026-11-03 19:14:17.657868236 +0100
+@@ -135,6 +135,7 @@
+ 	mac_ad->cfg80211_ctrl.BeaconExtraIeLen = 0;
+ }
+ 
++#ifdef APCLI_CFG80211_SUPPORT
+ static NDIS_802_11_AUTHENTICATION_MODE cfg80211_drv_get_auth(UINT8 auth)
+ {
+ 	switch (auth) {
+@@ -166,6 +167,7 @@
+ 		return Ndis802_11AuthModeMax;
+ 	}
+ }
++#endif /* APCLI_CFG80211_SUPPORT */
+ 
+ /********************************************************************************/
+ 
+@@ -3786,6 +3788,7 @@
+ 
+ 	scan_cmd.duration = pCfg80211_CB->pCfg80211_ScanReq->duration;
+ 	scan_cmd.ScanType = SCAN_ACTIVE;
++#ifdef APCLI_CFG80211_SUPPORT
+ 	if (iftype == NL80211_IFTYPE_STATION) {
+ 		scan_cmd.StaIndex = staIndex;
+ 		/*For APCLI trigger Partial Scan to avoid Station disconnection*/
+@@ -3793,7 +3796,9 @@
+ 		RTMP_DRIVER_80211_APCLI_SCAN(pAd, &scan_cmd);
+ 		MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR,
+ 			"Into RTMP_DRIVER_80211_APCLI_SCAN\n");
+-	} else {
++	} else
++#endif /* APCLI_CFG80211_SUPPORT */
++	{
+ 		scan_cmd.ApIndex = apIndex;
+ 		MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_DEBUG,
+ 			"Into RTMP_DRIVER_80211_AP_SCAN\n");
+--- a/mt_wifi/os/linux/cfg80211/cfg80211_util.c	2025-06-17 08:18:59.000000000 +0200
++++ b/mt_wifi/os/linux/cfg80211/cfg80211_util.c	2026-11-03 19:15:01.925871452 +0100
+@@ -914,8 +914,11 @@
+ 	return pChCtrl->ChListNum;
+ }
+ 
+-#ifdef APCLI_CFG80211_SUPPORT
++#ifndef AKM_SUITE_SAE
+ #define AKM_SUITE_SAE 0x08ac0f00
++#endif
++
++#ifdef APCLI_CFG80211_SUPPORT
+ int CFG80211OS_ExternalAuthRequest(PSTA_ADMIN_CONFIG pStaCfg)
+ {
+ 	int ret, len;
+--- a/mt_wifi/os/linux/cfg80211/cfg80211_vndr_cmm.c	2026-11-03 19:20:11.568893950 +0100
++++ b/mt_wifi/os/linux/cfg80211/cfg80211_vndr_cmm.c	2026-11-03 19:19:52.417892558 +0100
+@@ -7645,8 +7645,10 @@
+ 	{mt_cfg80211_vndr_attr_set_cosr_ie, cfg80211_drv_vndr_set_cosr_bcn_ie},
+ 	{mt_cfg80211_vndr_attr_wapp_cosr_info, cfg80211_drv_vndr_wapp_cosr_info},
+ 	{mt_cfg80211_vndr_attr_set_pmkid, cfg80211_drv_vndr_set_pmkid},
++#if defined(APCLI_CFG80211_SUPPORT) && defined(SUPP_RANDOM_MAC_IN_DRIVER_SUPPORT)
+ 	{mt_cfg80211_vndr_attr_set_mac_addr, cfg80211_drv_vndr_set_mac_addr},
+ 	{mt_cfg80211_vndr_attr_set_seq_num, cfg80211_drv_vndr_set_seq_num},
++#endif /* APCLI_CFG80211_SUPPORT && SUPP_RANDOM_MAC_IN_DRIVER_SUPPORT */
+ 	{mt_cfg80211_vndr_attr_set_wmm, cfg80211_drv_vndr_set_wmm},
+ 	{mt_cfg80211_vndr_attr_set_monitor, cfg80211_drv_vndr_set_monitor},
+ 	{mt_cfg80211_vndr_attr_clean_sta, cfg80211_drv_vndr_clean_sta},
