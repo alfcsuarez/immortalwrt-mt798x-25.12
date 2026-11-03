@@ -17,9 +17,11 @@ define Build/Prepare
 	$(CP) ./src/* $(PKG_BUILD_DIR)/
 endef
 
+TARGET_CFLAGS += -Wno-error=incompatible-pointer-types
+
 define Build/Compile
 	$(MAKE) -C "$(PKG_BUILD_DIR)" \
-		EXTRA_CFLAGS="$(EXTRA_CFLAGS)" \
+		EXTRA_CFLAGS="$(EXTRA_CFLAGS) $(TARGET_CFLAGS)" \
 		CROSS_COMPILE="$(TARGET_CROSS)" \
 		ARCH="$(LINUX_KARCH)" \
 		M="$(PKG_BUILD_DIR)" \
