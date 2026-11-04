@@ -42,7 +42,11 @@ define Build/mt7987-bl31-uboot
 endef
 
 define Build/mt7988-bl2
-	cat $(STAGING_DIR_IMAGE)/mt7988-$1-bl2.img >> $@
+	if [ -f "$(TOPDIR)/target/linux/mediatek/image/preloader/mt7988-$1-bl2.bin" ]; then \
+		cat $(TOPDIR)/target/linux/mediatek/image/preloader/mt7988-$1-bl2.bin >> $@; \
+	else \
+		cat $(STAGING_DIR_IMAGE)/mt7988-$1-bl2.img >> $@; \
+	fi
 endef
 
 define Build/mt7988-bl31-uboot
@@ -687,7 +691,7 @@ define Device/bananapi_bpi-r4-common
   DEVICE_VENDOR := Bananapi
   DEVICE_DTS_DIR := $(DTS_DIR)/
   DEVICE_DTS_LOADADDR := 0x45f00000
-  DEVICE_DTS_OVERLAY:= mt7988a-bananapi-bpi-r4-emmc mt7988a-bananapi-bpi-r4-rtc mt7988a-bananapi-bpi-r4-sd
+  DEVICE_DTS_OVERLAY:= mt7988a-bananapi-bpi-r4-emmc mt7988a-bananapi-bpi-r4-rtc mt7988a-bananapi-bpi-r4-sd mt7988a-bananapi-bpi-r4-wifi-mt7996a
   DEVICE_DTC_FLAGS := --pad 4096
   DEVICE_PACKAGES := kmod-hwmon-pwmfan kmod-i2c-mux-pca954x kmod-eeprom-at24 \
 		     kmod-rtc-pcf8563 kmod-sfp kmod-phy-aquantia kmod-usb3 e2fsprogs f2fsck mkf2fs mt7988-wo-firmware automount

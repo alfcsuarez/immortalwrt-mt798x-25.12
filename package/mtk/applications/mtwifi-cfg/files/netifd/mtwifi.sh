@@ -661,7 +661,8 @@ mac80211_hostapd_setup_base() {
 				EHT320*)
 					append base_cfg "eht_oper_chwidth=$eht_oper_chwidth" "$N"
 					append base_cfg "eht_oper_centr_freq_seg0_idx=$eht_oper_centr_freq_seg0_idx" "$N"
-					append base_cfg "eht_bw320_offset=$eht_bw320_offset" "$N"
+					# OpenWrt hostapd does not support eht_bw320_offset
+					# append base_cfg "eht_bw320_offset=$eht_bw320_offset" "$N"
 				;;
 				*)
 					append base_cfg "eht_oper_chwidth=$vht_oper_chwidth" "$N"
