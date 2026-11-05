@@ -1,0 +1,15 @@
+{
+	"luci-app-mtwifi-cfg": {
+		"description": "Grant access to mtwifi configuration",
+		"read": {
+			"file": {
+				"/usr/sbin/iwpriv": ["exec"]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/iwpriv": ["exec"]
+			}
+		}
+	}
+}

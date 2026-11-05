@@ -267,10 +267,6 @@ endif
 		mv $(1)/etc/wireless/mediatek/l1profile.dat $(1)/etc/wireless/l1profile.dat ; \
 	fi
 
-	if [ "$$(CONFIG_PACKAGE_hostapd-common)" != "y" ] ; then \
-		$(INSTALL_DIR) $(1)/etc/rc.button; \
-		$(INSTALL_BIN) ./files/common/wps-hotplug.sh $(1)/etc/rc.button/wps; \
-	fi
 endef
 
 $(eval $(call BuildPackage,wifi-dats))
