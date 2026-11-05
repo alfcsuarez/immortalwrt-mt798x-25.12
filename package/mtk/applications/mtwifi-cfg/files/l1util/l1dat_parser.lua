@@ -150,6 +150,8 @@ function l1dat_parser.load_l1_profile(path)
                  })
     --local nixio = require("nixio")
     local chipset_num = {}
+    local dir = io.popen("ls /etc/wireless/")
+    if not dir then return end
     local fd = io.open(path, "r")
     if not fd then return end
 
@@ -191,9 +193,9 @@ function l1dat_parser.load_l1_profile(path)
     -- print("Before setup ridx", util.serialize_data(devs, seen2))
 
     -- Force to setup reverse indice for quick search.
-    -- Benifit:
+    -- Benifit: 
     --   1. O(1) search with ifname, devname
-    --   2. Seperate DBDC name=k1;k2 format in the L1 profile into each
+    --   2. Seperate DBDC name=k1;k2 format in the L1 profile into each 
     --      ifname, devname.
     local dbdc_if = {}
     local ridx = l1dat_parser.IF_RINDEX
@@ -209,10 +211,10 @@ function l1dat_parser.load_l1_profile(path)
             for i = 1, band_num - 1 do
                 dbdc_if[i] = l1dat_parser.token_get(dev.main_ifname, i, nil)
             end
-            for i = 1, band_num do
+            for i = 1, band_num do 
                 devs[ridx][dbdc_if[i]] = {}
                 devs[ridx][dbdc_if[i]]["subidx"] = i
-
+                
                 for k, v in pairs(dev) do
                     if  k == "INDEX" or k == "EEPROM_offset" or k == "EEPROM_size"
                        or k == "mainidx" then
@@ -263,11 +265,7 @@ function l1dat_parser.load_l1_profile(path)
         else
             devs[ridx][dev.main_ifname] = dev
 
-            if dev.subidx then
-                devname = dev.INDEX.."_"..dev.mainidx.."_"..dev.subidx
-            else
-                devname = dev.INDEX.."_"..dev.mainidx
-            end
+            devname = dev.INDEX.."_"..dev.mainidx
             devs[dridx][devname] = dev
 
             for i = 1, l1dat_parser.MAX_NUM_EXTIF - 1 do  -- ifname idx is from 0
