@@ -1,0 +1,122 @@
+name: Build ImmortalWrt 25.12 for BPI R4
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /usr/share/swift /opt/ghc /usr/local/share/boost
+          sudo docker image prune --all --force
+          df -h
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext libncurses-dev libssl-dev python3-setuptools \
+            rsync swig unzip zlib1g-dev file wget libelf-dev ccache git jq
+
+      - name: Update and install feeds
+        run: |
+          ./scripts/feeds update -a
+          if grep -q '^define Package/weechat-minimal$' feeds/packages/net/weechat/Makefile 2>/dev/null && \
+             grep -qF ' +weechat ' feeds/luci/applications/luci-app-weechat/Makefile 2>/dev/null; then
+            sed -i 's/ +weechat / +weechat-minimal /' feeds/luci/applications/luci-app-weechat/Makefile
+            ./scripts/feeds update -i luci
+          fi
+          ./scripts/feeds install -a
+          for pkg in luci-app-fan luci-app-sfp-status luci-app-modemband luci-app-turboacc-mtk luci-app-traffic rpcd-mod-router-status; do
+            rm -rf "feeds/luci/applications/$pkg" "package/feeds/luci/$pkg"
+          done
+          if [ -f feeds/luci/collections/luci-ssl-openssl/Makefile ] && grep -qF '+px5g-openssl' feeds/luci/collections/luci-ssl-openssl/Makefile && [ ! -d package/utils/px5g-openssl ]; then
+            sed -i 's/+px5g-openssl/+px5g-standalone/' feeds/luci/collections/luci-ssl-openssl/Makefile
+          fi
+          if ! grep -q '_FORTIFY_SOURCE=0' package/libs/mbedtls/Makefile 2>/dev/null; then
+            echo 'TARGET_CFLAGS += -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0' >> package/libs/mbedtls/Makefile
+          fi
+
+      - name: Load BPI R4 custom config
+        run: |
+          cp defconfig/bpi-r4_custom_2512.config .config
+          for package in kmod-mt76-core kmod-mt76-connac kmod-mt7996e \
+              kmod-mt7990-firmware kmod-mt7996-firmware kmod-mt7996-233-firmware \
+              kmod-mt7996-firmware-common wifi-profile wifi-script \
+              kmod-en_npu kmod-mt_wifi_cmn kmod-crypto-hw-safexcel \
+              mtk-hqos luci-app-mtk-hqos mtkhnat_util ethswbox flowtable \
+              netsys_dbg_util tops-tool; do
+            symbol="CONFIG_PACKAGE_${package}"
+            sed -i "/^${symbol}=/d; /^# ${symbol} is not set$/d" .config
+            printf '# %s is not set\n' "$symbol" >> .config
+          done
+          for symbol in CONFIG_MTK_WIFI7_OSAL_SUPPORT CONFIG_PACKAGE_kmod-mt_wifi_osal; do
+            sed -i "/^${symbol}=/d; /^# ${symbol} is not set$/d" .config
+            printf '%s=y\n' "$symbol" >> .config
+          done
+          sed -i '/^CONFIG_EN_HWIFI_NPU_SUPPORT=/d; /^# CONFIG_EN_HWIFI_NPU_SUPPORT is not set$/d' .config
+          printf '# CONFIG_EN_HWIFI_NPU_SUPPORT is not set\n' >> .config
+          sed -i '/^CONFIG_KERNEL_NET_MEDIATEK_HNAT=/d; /^CONFIG_KERNEL_MEDIATEK_NETSYS_/d; /^# CONFIG_KERNEL_MEDIATEK_NETSYS_.* is not set$/d' .config
+          make defconfig
+
+      - name: Download dependencies
+        run: |
+          make download -j8
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+        timeout-minutes: 120
+
+      - name: Compile firmware
+        run: |
+          make -j$(nproc) || make -j1 V=s
+        timeout-minutes: 480
+        env:
+          CONFIG_CCACHE_DIR: ~/.ccache
+
+      - name: Prepare firmware artifacts
+        if: success()
+        run: |
+          mkdir -p /tmp/firmware
+          find bin/targets/mediatek/ -type f \( -name "*bananapi_bpi-r4*" -o -name "*sysupgrade*" -o -name "*preloader*" -o -name "*bl31-uboot*" -o -name "*.manifest" \) -exec cp -f {} /tmp/firmware/ \;
+          if [ -f /tmp/firmware/immortalwrt-mediatek-filogic_a73-bananapi_bpi-r4-sdcard.img.gz ] && \
+             [ ! -f /tmp/firmware/immortalwrt-mediatek-filogic-bananapi_bpi-r4-sdcard.img.gz ]; then
+            cp -f /tmp/firmware/immortalwrt-mediatek-filogic_a73-bananapi_bpi-r4-sdcard.img.gz \
+                  /tmp/firmware/immortalwrt-mediatek-filogic-bananapi_bpi-r4-sdcard.img.gz
+          fi
+          echo "FIRMWARE_DIR=/tmp/firmware" >> $GITHUB_ENV
+          ls -la /tmp/firmware
+
+      - name: Upload build artifacts
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: BPI-R4-25.12-firmware
+          path: ${{ env.FIRMWARE_DIR }}/
+          retention-days: 30
+
+      - name: Create release on success
+        if: success()
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ${{ env.FIRMWARE_DIR }}/*
+          tag_name: bpi-r4-25.12-build-${{ github.run_number }}
+          name: ImmortalWrt 25.12 BPI-R4 Build ${{ github.run_number }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

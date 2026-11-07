@@ -1,0 +1,46 @@
+{
+	"admin/mtk": {
+		"title": "MTK",
+		"order": 80,
+		"action": {
+			"type": "firstchild",
+			"recurse": true
+		}
+	},
+	"admin/mtk/traffic": {
+		"title": "流量分析",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "traffic/overview"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-traffic"
+			]
+		}
+	},
+	"admin/status/traffic": {
+		"action": {
+			"type": "alias",
+			"path": "admin/mtk/traffic"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-traffic"
+			]
+		}
+	},
+	"admin/services/traffic": {
+		"order": 60,
+		"action": {
+			"type": "alias",
+			"path": "admin/mtk/traffic"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-traffic"
+			]
+		}
+	}
+}

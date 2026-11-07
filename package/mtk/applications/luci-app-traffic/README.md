@@ -1,0 +1,634 @@
+# luci-app-traffic
+
+Per-application traffic statistics for OpenWrt / ImmortalWrt, in the style of a
+UniFi gateway: an application name, an icon, and how many bytes went down and
+up — measured **on the router**, so it still works for traffic that a proxy
+hides from an upstream gateway.
+
+## Why this exists
+
+An upstream device that classifies traffic by DPI (UniFi's application
+breakdown, for example) only sees what leaves the router. Once PassWall or
+OpenClash is in use, everything is inside an encrypted tunnel to one node, and
+every byte collapses into a single `SSL/TLS` bucket. AdGuard Home makes it
+worse for DNS-based identification: the clients' queries never leave the box.
+
+The router, by contrast, sits at both ends of the tunnel. It can see
+the domain a client resolved, and it can see how many bytes each flow carried.
+This package joins those two facts and reports per-application traffic that an
+upstream gateway fundamentally cannot.
+
+## How it works
+
+```
+conntrack bytes  ─┐
+                  ├─► (client, destination IP) ─► domain ─► application
+AGH querylog     ─┘
+```
+
+1. **Connection counters** come from `/proc/net/nf_conntrack`. The collector
+   prefers paired `bytes_total=` / `packets_total=` lifetime counters and a
+   kernel `traffic_id=` when available. They survive nlbwmon's netlink counter
+   resets; ordinary `bytes=` / `packets=` remain a supported, explicitly less
+   complete fallback. The collector samples every `traffic.settings.interval`
+   seconds (default 10). An optional bounded `/proc/net/nf_conntrack_closed`
+   snapshot supplies final counters and short connections between scans.
+2. **Domains** come from AdGuard Home's query log, read incrementally. Its
+   `Answer` field is a base64 DNS message; `ans.lua` decodes it and yields
+   `(client, domain, resolved IP)`.
+3. **Attribution** matches a flow's `(source, destination)` against those
+   mappings. A flow whose source is the router itself is the proxy tunnel and
+   is reported separately, so the traffic it carries is not counted twice. "The
+   router itself" means two things: a source outside the LAN prefixes (the far
+   end of a tunnel), and a source that *is* one of the box's own LAN addresses
+   (`self`, auto-detected on the LAN interface, v4 and v6). The second case
+   matters on a box that runs its own proxy: those connections are sourced from
+   the LAN address, and counting them as a client put `192.168.2.1` at the top
+   of the client list with 39 MB against it.
+   For inbound DNAT, the translated LAN endpoint comes from the reply tuple.
+   The counter baseline retains the original source and destination.
+4. **Names** — every flow gets a name, in this order:
+   1. `/etc/traffic/apps.tsv`, matched against the **host name exactly** first
+      (AdGuard Home reports `music.163.com`, so sub-domain rules work) and then
+      against the **longest matching domain suffix**;
+   2. `/etc/traffic/categories.tsv`, longest suffix match — hardware and
+      advertising domains then read as `CDN` / `Ads` / `Games` instead of a
+      meaningless host name;
+   3. the registrable domain itself: a website is identified by its domain,
+      which is what the reader actually recognises;
+   4. failing all of that (no DNS answer at all), a **protocol bucket** derived
+      from protocol and port — `SSL/TLS`, `QUIC`, `HTTP`, `DNS`, `STUN`,
+      `RTSP`, `Email`, `Other`. That is why an unnamed encrypted flow shows up
+      as `SSL/TLS` rather than disappearing into an "unknown" heap.
+
+   The two catalogues are large (see below), so they are **not** read on every
+   poll: a host name is resolved once, when it is first seen, and the answer is
+   cached in `/tmp/traffic/namemap.tsv`. The poll path then reads only that
+   cache, which is what keeps a 32,000-key catalogue from costing more than the
+   accounting itself. Replacing the catalogue (an upgrade) invalidates the
+   cache and everything is resolved again in one batch.
+
+5. **Per-host counters** (the `accounting` option, on by default). Everything
+   above is conntrack and DNS, which cannot be the whole story: a conntrack
+   entry can be missed when the table is full, `nf_conntrack_acct` can be off,
+   and a domain resolved by the proxy rather than locally leaves no DNS answer
+   to name the flow with. So the client **totals** come from a byte counter per
+   host, created in a small nftables table of its own (`inet traffic_acct`):
+
+   | direction | hook | match |
+   |---|---|---|
+   | upload | `prerouting`, priority `raw` | `iifname <lan> ip saddr <client>` |
+   | download | `postrouting`, priority `101` | `oifname <lan> ip daddr <client>` |
+
+   Upload is matched by source and download by destination, and no packet
+   matches both, so a directly routed download is not counted twice. Filtering
+   on the LAN interface is what keeps the proxy's own sockets out of it, since
+   those leave by the WAN device.
+
+   This is the idea behind **wrtbwmon** — account per host with firewall
+   counters rather than with conntrack — but deliberately **not** its hook
+   choice. wrtbwmon counts in the `FORWARD` chain.
+   That cannot work here: passwall's own nft table has only `prerouting` and
+   `output` base chains, and every proxied connection ends in `tproxy to :port`
+   or `redirect to :port`, both of which hand the connection to a local socket.
+   Proxied client traffic therefore goes `PREROUTING → INPUT` and never reaches
+   `FORWARD` — and AdGuard Home's DNS redirect leaves `PREROUTING` the same way.
+   A `FORWARD` counter would miss exactly the bulk it was added to measure.
+   (`wrtbwmon`'s `readDB.awk` is also gawk-only: it dispatches on `ARGIND`,
+   which busybox `awk` does not have, so on this target it would silently do
+   nothing at all.)
+
+   The download hook must be `postrouting` and not `prerouting` for the same
+   reason: the download half of a proxied connection is produced by a local
+   socket and leaves through `OUTPUT`, so it never appears in `prerouting`.
+
+   The counters are the client totals; the application breakdown stays
+   conntrack-based, and the page reports both, so the share of traffic that
+   could not be attributed is visible instead of hidden. With no `nft`
+   installed, or with `accounting` set to `0`, the client totals fall back to
+   conntrack and the page says so.
+
+   **Flow offloading defeats any netfilter counter**, this one included: an
+   offloaded flow stops traversing the hooks after its first packets. For exact
+   totals, leave `option flow_offloading` off in `/etc/config/firewall`.
+
+### Where the names come from, and where they cannot
+
+Naming a flow needs a `(client, domain, resolved IP)` triple. On this kind of
+router the client query does not necessarily reach AdGuard Home, because
+passwall reshapes DNS:
+
+* passwall's `helper_dnsmasq.lua` **stretches** the system dnsmasq — it takes
+  over `dhcp.@dnsmasq[0].server` and installs its own conf-dir — so the client
+  talks to dnsmasq and dnsmasq decides which domains go where;
+* passwall's default `dns_shunt` is `chinadns-ng`, and its default
+  `dns_redirect` is `1`, so proxied domains are answered by passwall itself;
+* AdGuard Home's default redirect mode is literally `dnsmasq-upstream`: it sits
+  *behind* dnsmasq, not in front of the clients.
+
+Two consequences, both visible on a real router as a large unattributed share:
+
+1. **A proxied domain is answered by passwall, so AdGuard never sees the query.**
+   Its log cannot name that flow, and no local DNS answer exists to match the
+   flow destination against.
+2. **For the queries AdGuard does see, the client field is dnsmasq
+   (`127.0.0.1`), not the device**, so an exact client-to-name match is
+   impossible and the flow can only be named through the "any client resolved
+   this address" path — or not at all.
+
+The `dnsmasq_log` option closes both gaps where a log file exists, because
+dnsmasq's own query log carries the real client address *and* the domains that
+never reach AdGuard:
+
+```
+uci set dhcp.@dnsmasq[0].logqueries='1'
+uci set dhcp.@dnsmasq[0].logfacility='/tmp/dnsmasq.log'
+uci commit dhcp && /etc/init.d/dnsmasq restart
+```
+
+Reading that file is off unless it exists; `traffic.settings.dnsmasq_log` can
+also point at it explicitly. It is read incrementally, and a query and its
+answer are paired by name (the answer line carries no client), so two devices
+asking for the same name at the same moment can be attributed to the wrong one —
+rare, and still better than no name.
+
+What remains unnameable by design: a domain the **proxy node resolves
+remotely**. Nothing on the router ever sees that answer, so no counter, log or
+catalogue here can name it; such flows stay in the protocol bucket. Naming them
+needs the proxy's own logs, which is a different integration.
+
+Flow state lives in `/tmp/traffic`. Once an hour the traffic of that hour is
+appended to `<datadir>/hourly.tsv`, which is the persistent history. The live
+counters are **not** reset by that: the page shows the session, and a session
+that fell back to zero at the top of every hour read as traffic going missing.
+The hour is worked out as the difference between the live counters and a
+snapshot taken at the previous roll (in `/tmp/traffic/arch`), so each row in the
+history still holds exactly one hour.
+
+## Installation
+
+```
+opkg install luci-app-traffic      # 24.10
+apk add luci-app-traffic           # 25.12, when built with CONFIG_USE_APK
+```
+
+The collector is enabled by default (`/etc/config/traffic`, `option enabled 1`)
+and runs after the network is up. Nothing else needs configuring: the LAN
+prefix is detected from the LAN interface and the querylog path from AdGuard
+Home's workdir. Both are shown on the page and can be overridden.
+
+## Versioning
+
+**Every change bumps `PKG_VERSION` by one patch level and resets `PKG_RELEASE`
+to 1.** The version is substituted into the collector at build time and the page
+shows it in the status strip, so the build that is actually running can be told
+from the one that was installed. Without this, two different collectors look
+identical after installation and opkg does not even treat the second as an
+upgrade.
+
+## Configuration
+| Option | Default | Meaning |
+|---|---|---|
+| `enabled` | `1` | run the collector |
+| `interval` | `10` | seconds between samples (minimum 2) |
+| `datadir` | `/etc/traffic` | where `hourly.tsv` (the history) is kept |
+| `querylog` | auto | AdGuard Home's `querylog.json` |
+| `dnsmasq_log` | auto | dnsmasq's query log, a second name source (see below) |
+| `lan4` / `lan6` | auto | client prefixes; anything else is "the router itself" |
+| `self` | auto | the box's own LAN addresses (space-separated); their flows are tunnel traffic, not a client |
+| `accounting` | `1` | per-host nftables counters for the client totals; `0` falls back to conntrack alone |
+| `appmap` | `/etc/traffic/apps.tsv` | the application catalogue |
+| `retention_days` | `7` | how much hourly history to keep |
+| `top_apps` / `top_clients` | `50` / `20` | how many entries the snapshot carries |
+| `resolve_interval` | `30` | minimum seconds between catalogue reads (see below) |
+| `dnsmap_max` | `50000` | upper bound on the `(client, host, ip)` map |
+| `purge_size_mb` | `100` | history is dropped when the data directory passes this size (see below) |
+
+Every option can also be set through the environment (`TRAFFIC_INTERVAL`,
+`TRAFFIC_QUERYLOG`, …), which is how the offline tests drive it.
+
+### The history is bounded by the collector, not by a button
+
+There is deliberately no "clear" button on the page. Clearing is housekeeping,
+and a button on a dashboard is an invitation to throw the history away by
+accident; it also cannot be undone, which is a poor fit for a single click next
+to the numbers.
+
+The collector bounds its own store instead:
+
+* once a **calendar month**, on the first start of a new month;
+* whenever `<datadir>` grows past **`purge_size_mb`** (100 MB by default).
+
+`hourly.tsv` is the file that actually grows without bound — an application row
+and a client row per application and client, per hour, kept forever. The two
+series files are already bounded by their point counts, and the name maps live
+in tmpfs and are bounded by `dnsmap_max`; they are cleared too, because they are
+what the purge is meant to reclaim.
+
+**Only history is dropped.** The live counters are the session in progress, and
+clearing them would make the page fall back to zero for traffic that is still on
+the wire — the opposite of what the page is for. Each purge writes one line to
+the log (`logread -e traffic`).
+
+## The catalogue
+
+`/etc/traffic/apps.tsv` and `/etc/traffic/categories.tsv` are generated, not
+hand-written. **1,669 application and site names** over ~32,000 keys, plus category rules:
+
+| File | Rows | What it holds |
+|---|---|---|
+| `apps.tsv` | 32,015 | `<name>` `<TAB>` `<key>` `<TAB>` `H\|S` — `H` matches the host name exactly, `S` matches it as the longest domain suffix |
+| `categories.tsv` | 10,384 | `<Category>` `<TAB>` `<key>` — suffix match only, used when no application claimed the host |
+
+Both are built by `tools/build-catalog.js` from two upstream projects, because
+neither is enough alone:
+
+* **[domain-list-community](https://github.com/v2fly/domain-list-community)**
+  (MIT) — 1,539 service files, the broadest domain coverage, but its file names
+  are slugs (`googlefcm`, `2kgames`) and it composes services with `include:`;
+* **[ios_rule_script](https://github.com/blackmatrix7/ios_rule_script)**
+  (GPL-2.0) — 666 per-service rule sets whose directory names are already brand
+  names (`XiaoHongShu`, `Epic`, `AppStore`, `AppleFirmware`) and which cover the
+  game clients, app stores and Apple/macOS services.
+
+```
+node tools/build-catalog.js          # re-download, regenerate tables and icons
+node tools/build-catalog.js --skip-icons
+```
+
+It also copies brand logos from
+[dashboard-icons](https://github.com/homarr-labs/dashboard-icons),
+[Iconify's logos collection](https://iconify.design),
+[selfhst/icons](https://github.com/selfhst/icons) and
+[simple-icons](https://simpleicons.org), matched by slug and, when that fails,
+by prefix or substring so that `Sina` finds `sinaweibo`. Anything still missing
+gets one more attempt through [Iconify's search
+API](https://iconify.design/docs/api/search.html), accepted only when the icon it
+returns actually names the application. The remaining names keep their letter
+avatar — a logo is never invented.
+
+Two rules keep the tables readable rather than merely large. Sources that are
+*routing bundles* rather than products (`ChinaMax`, `Global`, `Proxy`, the
+advertising and privacy blocklists) are excluded outright — the `Privacy`
+bundle alone claimed 39,896 keys, over half the catalogue, and would have shown
+every tracker as one row. And when two services claim the same key, the smaller
+rule set wins, so `play.google.com` reads as *Google Play* rather than *Google*;
+a small curated layer fixes the brands whose only upstream owner is a bundle
+(`taobao.com` is listed under `alibaba` and nowhere else).
+
+## Cost on the router, and on the page
+
+The tables are large and the page polls while it is open, so both ends are
+built to do nothing when nothing changed.
+
+**On the router**, one poll (measured at 2,000 conntrack flows, 5,000 resolved
+host names, 400 applications):
+
+| Stage | Cost | Note |
+|---|---|---|
+| `poll_ct` | dominant | parsing `/proc/net/nf_conntrack` is the floor; it is what the accounting *is* |
+| `classify` | small | reads the cached name map, not the catalogue |
+| `write_summary` | small | the heaviest N are selected inside awk, so no `sort`/`head` pipeline is spawned |
+| `resolve_names` | rare | reads the 786 KB catalogue only for host names never seen before |
+
+The catalogue is the one genuinely large thing, and it is read **once per new
+host name**, never per poll. Host names it has seen wait out `resolve_interval`
+(30 s) before a second look — except while the page is open, when the page calls
+`resolveNow` and the collector drops the wait, so a name that just appeared is
+resolved within a poll. Nobody watching, no cost.
+
+**On the page**, the DOM is updated rather than rebuilt. A refresh reuses the
+row it already has for each application and only writes the cells whose text
+actually changed. Measured over a 100-row table, second refresh:
+
+| | rebuild (before) | reuse (now) |
+|---|---|---|
+| nodes created, data unchanged | 1,060 | **0** |
+| nodes created, every byte changed | 1,060 | **0** |
+| nodes created, values *and* order changed | 1,060 | 52 |
+| `Image` objects created | 100 | **0** |
+| `L.resource()` calls | 100 | **0** |
+
+The icon count is the one that matters for memory: an `<img>` per row per
+refresh means the browser decodes the same 100 SVGs again every five seconds.
+Now each icon is created once, when its row first appears, and kept.
+
+Two cheap gates sit in front of that. A refresh whose snapshot has not advanced
+(the collector writes every 10 s, the page polls every 5 s) returns before
+touching the DOM, and a hidden tab skips the fetch entirely until it is shown
+again.
+
+**The donut and the chart are built with `createElementNS`.** LuCI's `E()` ends
+up in `document.createElement()`, which never produces an SVG element — a chart
+built that way is created without complaint, passes every syntax check, and then
+renders as nothing at all. `tools/page-render-selftest.js` drives the real
+`draw()`/`drawSeries()`/`drawStatus()` with a stub DOM that records namespaces
+and asserts what actually landed in the tree, which is the only way this class
+of bug shows up off-device.
+
+**A status strip explains the state of the collector** — running or not, how old
+the snapshot is, the interval, how many conntrack entries and host names it has,
+how many names are waiting to be resolved, which layer produced the client
+totals and which collector build is running. Each reading is its own soft grey
+chip, so a label and its value read as one item instead of a long row where the
+eye has to work out which caption belongs to which number. An empty page is
+otherwise a dead end: "no traffic yet", "the service is not running" and "the
+counters are not available" all look identical. The query log path is not shown:
+it is a configuration detail the page acts on, not something a reader can use,
+and it crowded out the readings that do say what is wrong.
+
+**On the RPC path**, `getSummary` hands the snapshot file straight to the caller
+instead of parsing it with jshn and serialising it again. The collector writes
+it write-to-temp-then-rename, so a reader never sees a partial file, and the
+round trip was only ever validating a file this package wrote itself.
+
+## The page
+
+Found under **Services → 流量统计** (`admin/services/traffic`).
+
+The layout follows the Argon theme's card style: translucent blurred panels,
+rounded corners, a soft shadow, and the theme's own primary colour as the
+accent when it defines one (`var(--primary)`), with bright fallbacks so it also
+looks right on the default theme. Dark mode is honoured through the class Argon
+sets on `<body>`. Nothing depends on Argon-only class names.
+
+Each application keeps a colour derived from **its own name**, never from its
+rank, so the donut, the legend and the table always agree and nothing changes
+colour just because the order moved. Two names that hash to the same slot are
+separated in name order, which is likewise rank-independent.
+
+* **Hero card** — total carried by clients, down/up rates, and the range
+  selector. The range defaults to **one day**, which is the window the total, the
+  donut, the table and the chart all describe. The two rates are the current
+  live rates in every range; the range changes the totals and chart window, not
+  what the rate means. There is no reset button (see
+  [above](#the-history-is-bounded-by-the-collector-not-by-a-button)).
+* **Throughput card** — down/up over time, drawn as plain SVG. Its tier is not a
+  second choice: the curve is the selected range at a coarser granularity, so the
+  page carries **one** range control instead of two that could be set to
+  disagree. The page opens on the day tier, and "since start" — which is not a
+  window at all — keeps it, so the curve does not shrink to an hour when the
+  table is switched to the session. **10 s points for the last hour** (the sharp view — a burst keeps its
+  shape), **1 min points for 12 h and for the last day** (the same file, two
+  lengths), and **1 h points for the last week**. The minute
+  and hour tiers live in `<datadir>` (`series60.tsv`, `series1h.tsv`) so they
+  survive a reboot; the 10 s tier is session state in `/tmp`. A quiet round is
+  recorded as a zero point rather than skipped. Points use actual timestamps;
+  missing intervals break the curve and its fill. The y axis describes interval
+  averages. A larger one-second peak is marked and quoted separately so it
+  cannot flatten the average-rate curve. A colour key
+  names the two curves under the header, because they often differ by orders of
+  magnitude and a small upload curve would otherwise read as a stray line.
+* **Donut card and throughput card** — the composition and the curve are the two
+  halves of one row, equal width from the same `calc(50% - .5rem)`, with the
+  collector state above them, the readings above the list, and the list last. The
+  card order is set with flex `order`, so it lives in one place instead of being
+  whatever order the cards happen to be built in. This was a grid placed by named
+  areas first, which reads better but did not survive a real browser: the area
+  template was ignored and the columns fell back to `auto`, so every card shrank
+  to its own content and the page came out as a ragged left-aligned stack. There
+  is deliberately **no `gap`** anywhere in the page layout either — flex `gap`
+  needs Safari 14.1, and a browser without it drops the spacing silently, so the
+  gutter is a margin on the left half. Below the tablet width the halves go full
+  width, in the same order.
+* **Donut card** — the ten largest applications with a matching legend. It used
+  to be a full-width block above the table, and before that a column beside the
+  table; as half of the row with the curve, the legend still spreads sideways
+  instead of being squeezed into one narrow column. Named slices below 0.5% of
+  the headline total join **Attributed**; the complete application
+  rows remain in the table. **Unattributed** stays separate and neutral. All
+  percentages use the headline total. Names that arrive in the snapshot —
+  applications, site names and the protocol buckets (`SSL/TLS`, `QUIC`,
+  `Other`) — are shown exactly as the collector wrote them and are deliberately
+  not translated. They are data rather than interface copy: one snapshot is read
+  by every language, and a bucket renamed in the browser would stop matching the
+  same bucket in the snapshot, the hourly archive and the logs, which is what
+  makes a log line or a screenshot checkable against the page. Only the two
+  names the page invents — **Attributed** and **Unattributed** — are localized.
+* **List card** — application, total and share, received, sent, busiest client,
+  device count; 100 rows kept in the DOM, so a page left open all day does not
+  grow. The column widths live in a `<colgroup>`: under `table-layout:fixed` those
+  are the widths the browser actually uses, and a percentage on the cells could be
+  overridden by the theme, which collapsed the name column to its own ellipsis
+  while the byte columns — the widest of which holds "528 KiB (32.4%)" — took the
+  rest of the card. The name now takes whatever the icon and the `TYPE` tag leave,
+  the tag never wraps into two stacked characters, the row backgrounds are set
+  explicitly so the theme's stripes cannot show through the tinted total row, and
+  each column's caption is aligned with its own data — the theme centres every
+  cell, which left "总量" in the middle of its column while the figure under it
+  hugged the right edge. Numbers are centred, the two text columns are left
+  aligned, and every cell carries the same padding.
+  Below the tablet width the list scrolls sideways rather than squeezing the names;
+  on a phone the busiest-client and device-count columns drop out.
+* **Footer card** — proxy tunnel total, client total, and the identification
+  rate (by the same client's DNS, by any client's DNS, unidentified).
+
+Column and caption strings are spelled out on purpose ("Application name",
+"Total traffic", "Received"): the one-word msgids (`Application`, `Total`,
+`Down`, `Up`, `Clients`) are translated by luci-base itself and its text wins at
+runtime, so `Application` came out as *应用层* — a firewall term, not a label for
+a list of apps.
+
+## Icons
+
+The package ships **1,503 SVG files** (about **2.90 MiB** uncompressed; the
+0.1.102 set was 900 files / 2.17 MiB). This includes brand artwork, category
+glyphs, and 18 explicitly neutral placeholders; file count is not brand coverage.
+
+| Kind | Count | Source | Rendered as |
+|---|---|---|---|
+| Brand logos | catalogued in `SOURCES.tsv` | [dashboard-icons](https://github.com/homarr-labs/dashboard-icons), [Iconify](https://iconify.design), [selfhst/icons](https://github.com/selfhst/icons), [simple-icons](https://simpleicons.org) and locally curated sources | the product mark |
+| Category / protocol glyphs | 71 Lucide assets plus other generic icons | [lucide-static](https://lucide.dev) (ISC) and sources recorded in `SOURCES.tsv` | line art in muted grey, plus a `TYPE` tag in the list |
+
+The two kinds are deliberately not interchangeable. A brand logo answers *which
+product*, a glyph answers *what kind of traffic* — SSL/TLS, QUIC, HTTP, DNS,
+STUN, RTSP, CDN, Media, Games, Ads, Tracker, IPTV… A bucket row is drawn with
+its glyph, an italic muted name and a `TYPE` tag, so it can never be mistaken
+for an application.
+
+Brand icons are keyed by the application name: lower-cased with runs of
+non-alphanumerics turned into dashes (`YouTube` → `youtube.svg`, `China Mobile`
+→ `china-mobile.svg`). The page loads
+`/luci-static/resources/traffic/icons/<name>.svg` and keeps its coloured letter
+avatar until that file has actually loaded, so a missing icon is invisible
+rather than broken. Both the image and the avatar occupy the same 26 px box, so
+row rhythm never shifts.
+
+The local `icons/domains.tsv` index maps **875 source-verified site domains** to
+packaged artwork, including their subdomains. It is loaded once with the icon
+indexes; SVG images are requested for rendered rows, not all 1,503 files.
+For a bare domain, the page can also reuse an already packaged logo with the same
+root name (for example, `stripe.com` uses `stripe.svg`). A short, verified alias
+list groups related domain rows under their service and lets the reader expand
+the original domain traffic; a shared CDN is kept separate. If an icon index
+arrives after the first table render, visible rows try again. Unknown domains
+retain their exact name and a two-letter fallback mark. The browser never asks
+a third-party favicon service for each row. Additional packaged icons can be
+added with a matching `SOURCES.tsv` provenance row and then checked with
+`node tools/check-icons.js`.
+
+### 自动网站图标缓存（1.1.8）
+
+无需任何设置。包内图标优先；未收录网站由路由器后台获取 favicon，网页与手机 App 共用 `/traffic-site-icons/websites.tsv` 索引及图片。获取失败保留旧图标；没有旧图标时显示域名前两个字母和固定配色。
+
+缓存查询先匹配精确主机名，再匹配已识别后缀边界内最近的父域，例如 `api.example.com` 可以复用 `example.com`。不跨已列出的公共后缀和托管租户边界；未知后缀只匹配精确域名。父域缓存不覆盖包内品牌图标。
+
+- 自动选择已挂载、可写的 NVMe；无可用 NVMe 时放在 `/tmp/traffic-site-icons`，缓存不写系统闪存。`/www/traffic-site-icons` 只建立发布缓存的符号链接。
+- 每分钟最多处理一个网站，使用独占进程锁；整个任务最多 20 秒，单次 HTTPS 请求最多 4 秒。与流量采集并行，不增加常驻进程，不阻塞实时速率。
+- 每小时扫描 `totals.tsv` 中完整的网站清单并生成待处理快照，不按流量排名截取前 256 个网站。每分钟沿游标继续处理一个缺失或到期站点，缓存淘汰后也不会反复处理前几个网站而遗漏后面的站点。
+- 单图下载最多 64 KiB，总缓存最多 16 MiB（按磁盘分配量计入图片，并动态预留索引、失败记录与临时替换空间）。最多保留 4096 条缓存记录；下载队列覆盖全部已发现网站，容量不足时淘汰旧记录。网页和手机完整读取已有索引。
+- 成功缓存 7 天后按需更新，失败至少 24 小时后再试；未活跃超过 7 天的记录清理。索引仅在内容变化时原子替换，避免重复写入。
+- 只访问 HTTPS 公网 IPv4 / IPv6 地址，固定经过校验的 DNS 结果，每种地址最多尝试 4 个，由 curl 在同一次下载中选择可连接的地址；每次传输总时限仍为 4 秒。不跟随重定向、不发送代理、Cookie 或路由器凭据。当前接受 PNG / ICO，并检查图标尺寸；主动内容 SVG、其他格式及无法访问的站点使用已有图标或字母回退。
+- `/tmp` 占用 RAM，重启后丢失；NVMe 缓存可跨重启保留。16 MiB 是上限，并非预分配量；对于 4 GB 内存约为 0.4%，Lua / curl 运行时内存另计。
+
+实际占用可查看 `cat /tmp/traffic/website-icons.metrics`：包含自动目录、实际分配字节数、记录数量、候选网站数 `candidate_sites`、全量扫描时间 `scan_at`、Lua 堆内存与该轮 CPU 时间。Lua 堆不等于进程 RSS，也不包含 curl；整机峰值需在路由器运行采集任务时测量 `/proc/<pid>/status`。本机策略测试不能代替 MT7988 实测。
+
+Direct filename matching covers **835 / 1,669 catalogue names** and **77.7% of
+catalogue rules**. The actual page resolver, including aliases, covers
+**839 / 1,669 names** and **78.4% of catalogue rules**. These counts include
+category/neutral glyphs and do not measure observed traffic or unique brands.
+The domain index additionally gives raw site rows a path to artwork even when
+their names are absent from the catalogue. All 875 mappings are tested through
+the actual page resolver by `node tools/icon-resolution-selftest.js`.
+
+The expansion lock `tools/site-icons.tsv` records 595 extra selections: 579
+have site domains, while 16 are game/platform marks available by explicit
+application name (some are reserved for future catalogue entries). A packaged
+PlayStation model icon does not imply that traffic can identify that console
+model. Dedicated game host rules cover Honkai Star Rail, Honkai Impact 3rd,
+Zenless Zone Zero and Wuthering Waves without relabelling shared publisher hosts.
+`node tools/expand-icons.js` maintains the set and its domain index.
+
+Legacy untraceable icons were replaced with recorded upstream artwork or
+explicit neutral placeholders. Reviewed replacements are pinned in
+`tools/icons-local`; the generator preserves their complete provenance rows.
+It no longer accepts prefix/substring brand matches (for example BlueDriver
+for Blued or Stoat for STO Express). `check-icons.js` rejects unknown or empty
+source metadata. Source records point to upstream terms; they are not a blanket
+licence grant for third-party trademarks.
+
+Where an upstream set states its licence the row carries it, as an SPDX id with
+the URL that states it: the Iconify sets are recorded from the icon-sets
+`collections.json` index, which is the only place they declare one - the
+per-collection JSON the glyphs themselves come from has no licence field at
+all. The sets do not agree with each other, which is why the column is filled
+rather than waved at: `cbi` is CC BY-NC-SA 4.0 while `cib` is CC0-1.0, and
+`arcticons` is share-alike. `check-icons.js` rejects a set that carries two
+different licences or that falls back to "see the collection licence", so a set
+nobody has verified fails instead of being described vaguely.
+
+Uncovered names retain their avatar. To add an icon by hand,
+put an SVG in `htdocs/luci-static/resources/traffic/icons/`, record its source
+in `root/usr/share/traffic/icons/SOURCES.tsv`, and run
+`node tools/check-icons.js --write` to refresh the index. No page code change is
+needed when its filename matches the service slug. The manifest ships with the
+package but outside the web directory: it is a licensing record for the
+redistributed artwork, nothing on the router reads it at runtime, and a 210 KiB
+table does not need to be served to every LAN client. The icons themselves stay
+in `htdocs/` because the page loads those.
+
+Note that `currentColor` is replaced with an explicit grey when a glyph is
+saved, and a monochrome brand mark is pinned to the same grey: an SVG loaded
+through `<img>` does not inherit the page colour, so `currentColor` would
+resolve to black and disappear in dark mode.
+
+Icons remain the trademarks of their owners and are used here only to identify
+the corresponding service. The licences the bundled sets declare are recorded
+per row in `root/usr/share/traffic/icons/SOURCES.tsv`; check them before
+redistributing.
+
+## Realtime network and counter integrity
+
+The existing application/client list is unchanged. A separate network panel
+shows WAN download/upload in Mbps and RX/TX packets per second, plus a straight
+five-minute curve sampled every second. One procd worker reads the same WAN
+device for every browser. Rates use monotonic elapsed time; missed ticks,
+counter resets and device recreation produce gaps and a fresh baseline.
+Closing the page stops sampling after the 60-second watch expires. The default
+one-second path never scans conntrack, nft rules, PPE flow tables or hardware MIBs.
+
+The regular collector's connection scan retains uint64 counters as decimal
+strings while calculating deltas, including values above JavaScript's exact
+integer range. No separate current-flow table, ranking cache or browser poll
+is created.
+
+On the matching 24.10 kernel, unique connection IDs prevent a reused tuple from
+inheriting old counters. The optional closed-connection ring recovers final
+snapshots and connections that begin and end between scans; buffer overflow,
+expired watches and missing records have explicit metadata in the private
+`/tmp/traffic/conntrack.json` diagnostic snapshot. This is
+separate from hardware read-clear accounting and does not establish that every
+last packet in flight was captured. Older kernels still work with reduced
+coverage. Upgrading an old baseline does not recredit existing lifetime bytes.
+
+While the page is open, the regular collector also caches the optional NPU
+provider once per round. Browsers read that shared cache. Five-core utilization
+and loaded firmware information are displayed when the provider supplies them;
+unavailable measurements are distinct from zero. NPU busy time, WAN throughput
+and attributed connection bytes remain separate measurements.
+
+Offline regressions for these paths:
+
+```sh
+python3 tools/realtime-selftest.py
+node tools/realtime-view-selftest.js
+node tools/tops-selftest.js
+node ../../tools/router-status-boundary-test.js
+python3 tools/tops-rpc-selftest.py --jshn-bin /path/to/host/jshn --jshn-shell /path/to/jshn.sh --output /tmp/rpc-receipts
+```
+
+## Limitations — read before trusting the numbers
+
+* **Coverage is not 100%.** Attribution needs a DNS answer. QUIC, ECH,
+  hard-coded IPs and applications that resolve through another path show up as
+  the destination's registrable name or as `unknown`. The page reports the
+  match rate so the coverage is visible rather than implied.
+* **Proxied destinations** are attributed from the client's own DNS lookups.
+  The flows themselves keep their real destination IP under tproxy, so this
+  works, but it is a correlation, not the proxy's own connection table.
+* **Long-lived idle connections** keep a domain that was resolved hours
+  earlier; a connection that outlives its DNS entry can be attributed to the
+  wrong domain. The mapping is refreshed on every lookup.
+* **IPv6** addresses are written differently by conntrack and by AdGuard Home
+  (leading zeros), so some IPv6 flows will not match even though IPv4 does.
+* The hourly history lives on the writable root. Add it to the sysupgrade keep
+  list if you want it to survive an upgrade.
+
+## Files
+
+| Path | Purpose |
+|---|---|
+| `/usr/share/traffic/collector.sh` | sampling, attribution, snapshot |
+| `/usr/share/traffic/connections.awk` | connection deltas and counter quality metadata |
+| `/usr/share/traffic/realtime.sh` | one-second WAN sampling worker |
+| `/tmp/traffic/live.json` | bounded five-minute WAN rates and PPS |
+| `/tmp/traffic/conntrack.json` | bounded private counter coverage diagnostics |
+| `/tmp/traffic/npu.json` | shared optional NPU telemetry cache |
+| `/usr/share/traffic/ans.lua` | base64 DNS answer → A/AAAA records |
+| `/etc/init.d/traffic` | procd service for the collector |
+| `/usr/libexec/rpcd/luci.traffic` | snapshot, hourly aggregation, reset |
+| `/www/luci-static/resources/view/traffic/overview.js` | the page |
+| `/etc/config/traffic` | settings |
+| `/etc/traffic/apps.tsv` | application catalogue (`name`, `key`, `H\|S`) |
+| `/etc/traffic/categories.tsv` | domain suffix → category (CDN, Games, Ads, …) |
+| `/etc/traffic/hourly.tsv` | per-hour history (the persistent totals) |
+| `/etc/traffic/series60.tsv` | 1-minute throughput for the last 24 h |
+| `/tmp/traffic/series10.tsv` | 10-second throughput for the last hour |
+| `/tmp/traffic/namemap.tsv` | host name → resolved name (the catalogue cache) |
+| `/tmp/traffic/version` | state schema; a change rebuilds the live counters (see below) |
+
+The live counters in `/tmp/traffic` are running totals, so a change in what they
+mean cannot be applied to numbers already accumulated. `version` records the
+schema they were built with: when it does not match the collector, the client,
+application, router and attribution counters are dropped and rebuilt on the next
+sample. The history in `<datadir>` (`hourly.tsv`, `series60.tsv`) and the
+conntrack baseline (`flow.state`) are left alone, so the change costs the
+session's totals, not the day's chart.
+
+Not installed, but shipped in the repository for regeneration and verification:
+
+| Path | Purpose |
+|---|---|
+| `tools/build-catalog.js` | rebuild both catalogues and the icon set from upstream |
+| `tools/collector-selftest.sh` | offline regression: every attribution path, the box's own addresses, the state schema |
+| `tools/page-render-selftest.js` | offline rendering check (SVG namespace, chart, status strip) |

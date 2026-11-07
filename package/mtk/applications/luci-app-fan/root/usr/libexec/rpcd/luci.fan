@@ -377,11 +377,11 @@ load_board_profile() {
 	MODEL_NAME=$(read_trimmed "$SYSINFO_DIR/model") || MODEL_NAME=''
 	lowered=$(printf '%s %s\n' "$BOARD_NAME" "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')
 
-	if printf '%s\n' "$lowered" | grep -Eiq 'h5000m|mt7987'; then
-		IS_H5000M=1
-		PROFILE='h5000m'
+	if printf '%s\n' "$lowered" | grep -Eiq 'bpi[-[:space:]]*r4|mt7988'; then
+		IS_BPI_R4=1
+		PROFILE='bpi-r4'
 	else
-		IS_H5000M=0
+		IS_BPI_R4=0
 		PROFILE='generic'
 	fi
 }
@@ -397,43 +397,12 @@ resolve_zone_trip() {
 json_add_common() {
 	json_add_string board_name "$BOARD_NAME"
 	json_add_string model_name "$MODEL_NAME"
-	json_add_boolean is_h5000m "$IS_H5000M"
+	json_add_boolean is_bpi_r4 "$IS_BPI_R4"
 	json_add_string profile "$PROFILE"
 	json_add_boolean enabled "$ENABLED"
 	json_add_string mode "$MODE"
 	json_add_int manual_pwm "$MANUAL_PWM"
 	json_add_int poll_interval "$POLL_INTERVAL"
-}
-
-json_add_empty_runtime() {
-	json_add_string zone ""
-	json_add_string thermal_type ""
-	json_add_string zone_temp ""
-	json_add_string fan_on_temp ""
-	json_add_string fan_off_temp ""
-	json_add_string configured_on_temp ""
-	json_add_string configured_off_temp ""
-	json_add_string hysteresis ""
-	json_add_string next_trip_temp ""
-	json_add_string headroom ""
-	json_add_string start_delta ""
-	json_add_string load_ratio "0"
-	json_add_string state "disabled"
-	json_add_boolean thermal_supported 0
-	json_add_boolean pwm_supported 0
-	json_add_boolean mode_supported 0
-	json_add_string hwmon_name ""
-	json_add_string hwmon_path ""
-	json_add_string pwm_raw ""
-	json_add_string pwm_percent ""
-	json_add_string pwm_enable_mode ""
-	json_add_string fan_rpm ""
-	json_add_string actual_fan_rpm ""
-	json_add_string estimated_fan_rpm ""
-	json_add_string rpm_source "unavailable"
-	json_add_int fan_max_rpm "$SMART_MAX_RPM"
-	json_add_string smart_min_temp ""
-	json_add_string smart_max_temp ""
 }
 
 get_status() {
@@ -457,6 +426,7 @@ get_status() {
 
 	json_init
 	json_add_common
+	json_add_boolean running "$(ubus -t 2 call service list '{"name":"luci-fan"}' 2>/dev/null | jsonfilter -e '@["luci-fan"].instances.*.running' 2>/dev/null | grep -q true && echo 1 || echo 0)"
 
 	if resolve_primary_thermal_zone; then
 		thermal_supported=1

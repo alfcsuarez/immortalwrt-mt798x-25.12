@@ -1,0 +1,263 @@
+#!/bin/sh
+# Independent read-only system and wireless status. No traffic dependency.
+. /usr/share/libubox/jshn.sh
+STATE_DIR=${STATE_DIR:-/tmp/router-status}
+
+# Expose aggregate CPU counters. The phone computes usage from two samples;
+# load average is not a CPU percentage.
+get_system_metrics() {
+	local counters total idle
+	counters=$(awk '$1 == "cpu" {
+		for (i = 2; i <= 9; i++) total += $i
+		idle = $5 + $6
+		printf "%.0f %.0f\n", total, idle
+		exit
+	}' "${PROC_STAT_PATH:-/proc/stat}" 2>/dev/null)
+	set -- $counters
+	json_init
+	json_add_object cpu
+	[ -n "${1:-}" ] && json_add_string total "$1"
+	[ -n "${2:-}" ] && json_add_string idle "$2"
+	json_close_object
+	if [ -r "${TEMPERATURE_SOURCE:-/usr/share/router-status/temperatures.sh}" ]; then
+		. "${TEMPERATURE_SOURCE:-/usr/share/router-status/temperatures.sh}"
+		get_temperatures
+	fi
+	json_dump
+}
+
+# Serve the collector's RAM snapshot only. A browser request must not scan the
+# PPE table, read read-clear counters, or issue firmware mailbox requests.
+get_acceleration_status() {
+	local file="$STATE_DIR/acceleration.json" raw sampled now rest schema
+	read -r now rest < "${PROC_UPTIME_PATH:-/proc/uptime}" || now=''
+	now=${now%%.*}
+	case "$now" in
+		''|*[!0-9]*) printf '{"schema":1,"available":false,"coverage":"invalid_uptime"}\n'; return ;;
+	esac
+	# The read request renews interest in this cache, not driver state. Without
+	# a viewer the worker does not scan PPEs or query NPU firmware mailboxes.
+	umask 077
+	[ -d "$STATE_DIR" ] || mkdir -p "$STATE_DIR" || return
+	printf '%s\n' "$now" > "$STATE_DIR/acceleration.watch.new" &&
+		mv -f "$STATE_DIR/acceleration.watch.new" "$STATE_DIR/acceleration.watch"
+	[ -r "$file" ] || {
+		printf '{"schema":1,"available":false,"coverage":"no_sample"}\n'
+		return
+	}
+	raw=$(head -c 4097 "$file" 2>/dev/null)
+	if [ "${#raw}" -gt 4096 ] || ! json_load "$raw" 2>/dev/null; then
+		printf '{"schema":1,"available":false,"coverage":"invalid"}\n'
+		return
+	fi
+	json_get_var sampled sampled_uptime
+	json_get_var schema schema
+	case "$sampled" in ''|*[!0-9]*) sampled='' ;; esac
+	case "$now" in ''|*[!0-9]*) sampled='' ;; esac
+	if [ "$schema" = 1 ] && [ -n "$sampled" ] && [ "${#sampled}" -le 10 ] &&
+	   [ "${#now}" -le 10 ] && [ "$sampled" -le "$now" ] 2>/dev/null &&
+	   [ "$((now - sampled))" -le 20 ]; then
+		printf '%s\n' "$raw"
+	else
+		printf '{"schema":1,"available":false,"coverage":"stale"}\n'
+	fi
+}
+
+# Return only operational radio fields. The raw netifd response also contains
+# configured Wi-Fi keys, which must never leave the router through this API.
+get_wireless_status() {
+	local raw keys key up band channel htmode ifname bssid records item old_ifs interface_keys first_interface
+	raw=$(ubus -S call network.wireless status 2>/dev/null) || raw=''
+	if [ -z "$raw" ] || ! json_load "$raw" 2>/dev/null; then
+		json_init
+		json_add_array radios; json_close_array
+		json_add_string error 'wireless status unavailable'
+		json_dump
+		return
+	fi
+	json_get_keys keys
+	records=''
+	for key in $keys; do
+		case "$key" in ''|*[!A-Za-z0-9_.-]*) continue ;; esac
+		json_select "$key" || continue
+		json_get_var up up
+		band=''; channel=''; htmode=''; ifname=''; bssid=''
+		if json_select config 2>/dev/null; then
+			json_get_var band band
+			json_get_var channel channel
+			json_get_var htmode htmode
+			json_select ..
+		fi
+		if json_select interfaces 2>/dev/null; then
+			json_get_keys interface_keys
+			first_interface=''
+			# Older jshn versions return key lists with a leading space.
+			for first_interface in $interface_keys; do break; done
+			if [ -n "$first_interface" ] && json_select "$first_interface" 2>/dev/null; then
+				json_get_var ifname ifname
+				json_select ..
+			fi
+			json_select ..
+		fi
+		json_select ..
+		case "$up" in 1|true) up=1 ;; *) up=0 ;; esac
+		case "$band" in ''|*[!A-Za-z0-9.]* ) band='' ;; esac
+		case "$channel" in ''|*[!0-9]* ) channel='' ;; esac
+		case "$htmode" in ''|*[!A-Za-z0-9]* ) htmode='' ;; esac
+		case "$ifname" in ''|*[!A-Za-z0-9_.-]* ) ifname='' ;; esac
+		if [ -n "$ifname" ] && [ -r "${WIFI_SYS_NET:-/sys/class/net}/$ifname/address" ]; then
+			read -r bssid < "${WIFI_SYS_NET:-/sys/class/net}/$ifname/address"
+			case "$bssid" in
+				??:??:??:??:??:??) case "$bssid" in *[!0-9A-Fa-f:]* ) bssid='' ;; esac ;;
+				*) bssid='' ;;
+			esac
+		fi
+		records="$records $key|$up|$band|$channel|$htmode|$ifname|$bssid"
+	done
+	json_init
+	json_add_array radios
+	for item in $records; do
+		old_ifs=$IFS; IFS='|'; set -- $item; IFS=$old_ifs
+		json_add_object ''
+		json_add_string name "$1"
+		json_add_boolean up "$2"
+		[ -n "${3:-}" ] && json_add_string band "$3"
+		[ -n "${4:-}" ] && json_add_string channel "$4"
+		[ -n "${5:-}" ] && json_add_string htmode "$5"
+		[ -n "${6:-}" ] && json_add_string ifname "$6"
+		[ -n "${7:-}" ] && json_add_string bssid "$7"
+		json_close_object
+	done
+	json_close_array
+	json_dump
+}
+
+get_wireless_history() {
+	local file="$STATE_DIR/wifi-history.tsv"
+	if [ ! -s "$file" ]; then
+		printf '{"interval":300,"points":[]}\n'
+		return
+	fi
+	awk -F '\t' '
+		BEGIN { printf "{\"interval\":300,\"points\":["; separator = "" }
+		NF == 6 && $1 ~ /^[0-9]+$/ && $2 ~ /^[A-Za-z0-9_.-]+$/ &&
+		$3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ &&
+		($5 == "-" || $5 ~ /^[0-9]+(\.[0-9]+)?$/) &&
+		($6 == "-" || $6 ~ /^[0-9]+(\.[0-9]+)?$/) {
+			name = $2
+			bucket = int($1 / 300)
+			if (name in last && bucket != last_bucket[name]) emit(last[name])
+			last[name] = $0
+			last_bucket[name] = bucket
+		}
+		function emit(record, fields, tx, rx) {
+			split(record, fields, "\t")
+			tx = fields[5] == "-" ? "null" : fields[5]
+			rx = fields[6] == "-" ? "null" : fields[6]
+			printf "%s[%s,\"%s\",%s,%s,%s,%s]", separator,
+				fields[1], fields[2], fields[3], fields[4], tx, rx
+			separator = ","
+		}
+		END { for (name in last) emit(last[name]); print "]}" }
+	' "$file"
+}
+
+
+# Optional bounded NPU metadata. No traffic/LuCI dependency or device writes.
+get_npu_status() {
+	local status rc schema npu_type tunnels_type accounting_type
+	if [ ! -x /usr/bin/mtk-tops-status ]; then
+		printf '{"available":false,"coverage":"provider_missing"}\n'
+		return
+	fi
+	if ! command -v timeout >/dev/null 2>&1; then
+		printf '{"available":false,"coverage":"no_timeout_tool"}\n'
+		return
+	fi
+	status=$(timeout 12 /usr/bin/mtk-tops-status 2>/dev/null)
+	rc=$?
+	if [ "$rc" -ne 0 ] || [ "${#status}" -gt 131072 ]; then
+		printf '{"available":false,"coverage":"provider_failed","exit":%s}\n' "$rc"
+		return
+	fi
+	# json_load() alone may evaluate empty parser output and return success.
+	if jshn -r "$status" >/dev/null 2>&1 && json_load "$status" 2>/dev/null; then
+		json_get_var schema schema
+		json_get_type npu_type npu
+		json_get_type tunnels_type tunnels
+		json_get_type accounting_type accounting
+		case "$schema:$npu_type:$tunnels_type:$accounting_type" in
+			2:object:object:object|3:object:object:object|4:object:object:object)
+				printf '%s\n' "$status"
+				return ;;
+		esac
+	fi
+	printf '{"available":false,"coverage":"provider_invalid"}\n'
+}
+
+# Optional real utilization; does not fetch tunnel metadata or traffic totals.
+get_npu_usage() {
+	local usage rc schema schema_type available unit percent cores available_type percent_type cores_type coverage
+	if [ ! -x /usr/bin/mtk-npu-usage ]; then
+		printf '{"available":false,"coverage":"provider_missing"}\n'
+		return
+	fi
+	if ! command -v timeout >/dev/null 2>&1; then
+		printf '{"available":false,"coverage":"no_timeout_tool"}\n'
+		return
+	fi
+	usage=$(timeout 3 /usr/bin/mtk-npu-usage 2>/dev/null)
+	rc=$?
+	if [ "$rc" -ne 0 ] || [ "${#usage}" -gt 1024 ]; then
+		printf '{"available":false,"coverage":"provider_failed"}\n'
+		return
+	fi
+	if jshn -r "$usage" >/dev/null 2>&1 && json_load "$usage" 2>/dev/null; then
+		json_get_var schema schema; json_get_type schema_type schema; json_get_var unit unit
+		json_get_var available available; json_get_type available_type available
+		json_get_var percent percent_milli; json_get_type percent_type percent_milli
+		json_get_var cores core_count; json_get_type cores_type core_count
+		json_get_var coverage coverage
+		if [ "$schema:$schema_type:$unit:$available_type" = '1:int:mean_core_busy_percent:boolean' ]; then
+			if [ "$available" = 1 ] && [ "$coverage" = complete ] &&
+			   [ "$percent_type:$cores_type:$cores" = 'int:int:5' ]; then
+				case "$percent" in ''|*[!0-9]*) percent=invalid ;; esac
+				if [ "${#percent}" -le 6 ] && [ "$percent" -le 100000 ] 2>/dev/null; then
+					printf '{"schema":1,"available":true,"unit":"mean_core_busy_percent","percent_milli":%s,"core_count":5,"coverage":"complete"}\n' "$percent"
+					return
+				fi
+			elif [ "$available" = 0 ]; then
+				case "$coverage" in
+					missing|no_timeout_tool|read_failed|oversized|invalid|driver_unsupported)
+						printf '{"schema":1,"available":false,"unit":"mean_core_busy_percent","coverage":"%s"}\n' "$coverage"
+						return ;;
+				esac
+			fi
+		fi
+	fi
+	printf '{"available":false,"coverage":"provider_invalid"}\n'
+}
+
+case "${1:-}" in
+    list)
+        json_init
+        json_add_object getSystemMetrics; json_close_object
+        json_add_object getWirelessStatus; json_close_object
+        json_add_object getWirelessHistory; json_close_object
+        json_add_object getNpuStatus; json_close_object
+        json_add_object getNpuUsage; json_close_object
+        json_add_object getAccelerationStatus; json_close_object
+        json_dump
+        ;;
+    call)
+        case "${2:-}" in
+            getSystemMetrics) get_system_metrics ;;
+            getWirelessStatus) get_wireless_status ;;
+            getWirelessHistory) get_wireless_history ;;
+            getNpuStatus) get_npu_status ;;
+            getNpuUsage) get_npu_usage ;;
+            getAccelerationStatus) get_acceleration_status ;;
+            *) json_init; json_add_string error 'unknown method'; json_dump ;;
+        esac
+        ;;
+esac

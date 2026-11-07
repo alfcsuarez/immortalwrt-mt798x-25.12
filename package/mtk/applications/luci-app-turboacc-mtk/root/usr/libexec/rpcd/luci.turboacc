@@ -69,11 +69,12 @@ local methods = {
 			local boardinfo = util.ubus("system", "board") or {}
 			local kernel    = tostring(boardinfo.kernel or "")
 			local features  = {
+				eqosActive        = fs.access("/var/run/eqos.active") or fs.access("/var/run/eqos/mode"),
 				hasIPV6           = fs.access("/proc/net/ipv6_route"),
 				-- mt798x primary path is HNAT; other engines are user-selectable (kernel modules may be absent, init script handles gracefully)
-				hasFLOWOFFLOADING = true,
-				hasFASTCLASSIFIER = true,
-				hasSHORTCUTFECM   = true,
+				hasFLOWOFFLOADING = false, -- Native flowtable settings are owned by the firewall UI.
+				hasFASTCLASSIFIER = module_file_exists(kernel, { "fast_classifier", "fast-classifier" }) or module_loaded({ "fast_classifier" }),
+				hasSHORTCUTFECM   = module_file_exists(kernel, { "shortcut_fe_cm", "shortcut-fe-cm" }) or module_loaded({ "shortcut_fe_cm" }),
 				hasMEDIATEKHNAT   = module_file_exists(kernel, { "mtkhnat", "mediatek_hnat" }) or
 					module_loaded({ "mtkhnat", "mediatek_hnat" }) or
 					fs.stat("/sys/kernel/debug/hnat", "type") == "dir",
@@ -87,7 +88,7 @@ local methods = {
 		call = function()
 			local fptype
 			if fs.access("/sys/module/xt_FLOWOFFLOAD/refcnt") and
-				(readfile("/sys/module/xt_FLOWOFFLOAD/refcnt") or "0") ~= "0" then
+			(readfile("/sys/module/xt_FLOWOFFLOAD/refcnt") or "0") ~= "0" then
 				fptype = "Flow offloading"
 			elseif fs.stat("/sys/module/fast_classifier", "type") == "dir" then
 				fptype = "Fast classifier"
@@ -97,6 +98,7 @@ local methods = {
 				hnat_hook_enabled()
 			then
 				local hnat_note = ""
+
 				if has_mediatek_wireless_dat() and
 					sys.call("grep -q 'WHNAT=1' /etc/wireless/mediatek/*.dat") ~= 0
 				then

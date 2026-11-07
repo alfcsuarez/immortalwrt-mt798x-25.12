@@ -42,7 +42,11 @@ define Build/mt7987-bl31-uboot
 endef
 
 define Build/mt7988-bl2
-	cat $(STAGING_DIR_IMAGE)/mt7988-$1-bl2.img >> $@
+	if [ -f "$(TOPDIR)/target/linux/mediatek/image/preloader/mt7988-$1-bl2.bin" ]; then \
+		cat $(TOPDIR)/target/linux/mediatek/image/preloader/mt7988-$1-bl2.bin >> $@; \
+	else \
+		cat $(STAGING_DIR_IMAGE)/mt7988-$1-bl2.img >> $@; \
+	fi
 endef
 
 define Build/mt7988-bl31-uboot
@@ -708,9 +712,6 @@ define Device/bananapi_bpi-r4-common
   ARTIFACT/sdcard.img.gz	:= mt798x-gpt sdmmc |\
 				   pad-to 17k | mt7988-bl2 sdmmc-comb |\
 				   pad-to 6656k | mt7988-bl31-uboot $$(DEVICE_NAME)-sdmmc |\
-				$(if $(CONFIG_TARGET_ROOTFS_INITRAMFS),\
-				   pad-to 12M | append-image-stage initramfs-recovery.itb | check-size 44m |\
-				) \
 				   pad-to 44M | mt7988-bl2 spim-nand-ubi-comb |\
 				   pad-to 45M | mt7988-bl31-uboot $$(DEVICE_NAME)-snand |\
 				   pad-to 51M | mt7988-bl2 emmc-comb |\

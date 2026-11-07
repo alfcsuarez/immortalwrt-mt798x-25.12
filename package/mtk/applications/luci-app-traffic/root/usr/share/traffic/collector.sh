@@ -1,0 +1,2104 @@
+#!/bin/sh
+# collector.sh - per-application traffic accounting for luci-app-traffic.
+#
+# How the numbers are produced
+# ---------------------------
+#   1. /proc/net/nf_conntrack is sampled every <interval> seconds.  Every flow
+#      carries packets=/bytes= per direction (nf_conntrack_acct is on by
+#      default in this target tree), so the difference between two samples is
+#      the traffic of that flow in that interval.
+#   2. AdGuard Home's querylog is read incrementally.  Its base64 Answer field
+#      is decoded by ans.lua, which yields (client, domain, resolved IP).
+#      That is what turns a bare destination IP into a name.
+#   3. The two catalogues (apps.tsv, categories.tsv) are large - a couple of
+#      thousand applications over ~80k keys.  Reading them on every poll would
+#      cost more than the accounting itself, so they are read ONLY when a host
+#      name is seen for the first time: the answer is cached in
+#      $STATE_DIR/namemap.tsv and the per-poll path reads just that cache.
+#      A catalogue that changed under us (package upgrade) invalidates the
+#      cache and every known host name is resolved again in one batch.
+#   4. A flow is then given a name, in this order:
+#        a. the host name itself, exactly, in the application table (DOMAIN and
+#           full:host rules) - this is what separates music.163.com from 163.com;
+#        b. the longest matching suffix in the application table (DOMAIN-SUFFIX
+#           rules and bare domains) - note this handles multi-label suffixes
+#           like co.uk without needing a public-suffix list;
+#        c. the longest matching suffix in the category table (categories.tsv),
+#           so infrastructure reads as CDN / Ads / Cloud rather than as a
+#           meaningless host name;
+#        d. the registrable domain itself - a website is identified by its
+#           domain, which is what the reader actually recognises;
+#        e. failing all of that (no DNS answer at all), a protocol bucket
+#           derived from protocol and port: SSL/TLS, QUIC, HTTP, DNS, STUN,
+#           RTSP, Email, Other.  This is why an unnamed encrypted flow shows
+#           up as "SSL/TLS" instead of disappearing into an "unknown" heap.
+#      A flow whose source is the router itself is the proxy tunnel and is
+#      accounted separately, so it never doubles the client traffic it carries.
+#
+# State lives in /tmp/traffic (RAM).  Once an hour the session totals are
+# appended to <datadir>/hourly.tsv and reset, which is the persistent history.
+#
+# The one thing this does change outside its own state is a pair of nftables
+# counting chains of its own (table inet traffic_acct), used for the per-host
+# byte counters.  It touches no firewall, DNS or proxy configuration: the chains
+# only count, and they are removed when the service stops.  Set
+# traffic.settings.accounting to 0 to leave the firewall alone entirely, in
+# which case the client totals come from conntrack as they did before.
+
+set -u
+
+STATE_DIR=${STATE_DIR:-/tmp/traffic}
+SELF_DIR=${SELF_DIR:-/usr/share/traffic}
+CT=${CT:-/proc/net/nf_conntrack}
+LUA=${LUA:-/usr/bin/lua}
+# uci is not in the same place on every build.  It is /sbin/uci on OpenWrt and
+# ImmortalWrt, and the hard-coded /usr/bin/uci this used to carry does not fail
+# loudly when it is wrong: uci_get() simply returns nothing, so every setting
+# silently falls back to its default.  That is how traffic.settings.wan_if could
+# be set, committed and read back correctly by hand (uci get prints it), and the
+# collector still ignored it and measured the default-route device instead.
+UCI=${UCI:-}
+[ -n "$UCI" ] || UCI=$(command -v uci 2>/dev/null)
+[ -n "$UCI" ] || UCI=/sbin/uci
+# The device counters, and the routing tables that name the device to read.  The
+# paths are overridable for the same reason STATE_DIR is: the offline suite has
+# to be able to drive them without a router.
+PROC_NET_DEV=${TRAFFIC_PROC_NET_DEV:-/proc/net/dev}
+PROC_NET_ROUTE=${TRAFFIC_PROC_NET_ROUTE:-/proc/net/route}
+PROC_NET_ROUTE6=${TRAFFIC_PROC_NET_ROUTE6:-/proc/net/ipv6_route}
+
+CFG_ENABLED=1
+CFG_INTERVAL=10
+CFG_DATADIR=/etc/traffic
+CFG_QUERYLOG=
+CFG_LAN4=
+CFG_LAN6=
+# the router's own LAN addresses, space separated; a source matching one of
+# these is the router, not a client
+CFG_SELF=
+# per-host byte counters in nftables, on top of the conntrack accounting: they
+# do not depend on nf_conntrack_acct or on the connection table having room, and
+# they are what makes the client totals authoritative
+CFG_ACCT=1
+# dnsmasq own query log, a second name source.  On a router where passwall has
+# taken dnsmasq over, the client talks to dnsmasq and only part of the traffic
+# reaches AdGuard Home, so this is often the only place both the device address
+# and the proxied domains appear.  Empty means: use it if it exists.
+CFG_DNSLOG=
+# set once per round by account_clients(): 1 when the nft counters are running
+# and own the client totals, 0 when the conntrack totals stand in for them
+ACCT_ON=0
+# and 1 there when the firewall has flow offloading on, which is what the summary
+# reports so the page can say the nft counters are not seeing the forwarded
+# traffic.  Declared here because the summary is built even on a round where
+# account_clients() returned before reaching the assignment.
+ACCT_OFFLOAD=0
+# The device whose counters are the authoritative total.  Resolved once, by
+# wan_if(); empty means no device could be identified, and then the attributed
+# numbers are all there is to publish.
+WAN_IF=
+CFG_APPMAP=$CFG_DATADIR/apps.tsv
+CFG_CATEGORIES=$CFG_DATADIR/categories.tsv
+CFG_RETENTION=7
+CFG_TOP_APPS=300
+CFG_TOP_CLIENTS=20
+CFG_ICONS_FETCH=0
+CFG_ICONS_URL=https://cdn.simpleicons.org
+# Minimum seconds between catalogue reads.  Fresh host names keep arriving while
+# someone browses, and re-reading an 80k-key catalogue for every one of them
+# would cost more than the accounting itself; inside this window they simply
+# wait, and until then they show as their registrable domain.  A large batch
+# (first run, or a burst) is resolved immediately.
+CFG_RESOLVE=30
+# Upper bound on the (client, host, ip) map; older entries are dropped once an
+# hour.  Names already resolved are kept separately, so this only bounds memory.
+CFG_DNSMAP_MAX=50000
+# Two-tier throughput history: a sharp recent window and a coarse long one.
+# 10 s / 1 h keeps the shape of a burst, 1 min / 24 h gives the day's context;
+# the point counts follow from these and the sampling interval.
+CFG_SERIES_HOT=3600
+CFG_SERIES_COLD=86400
+SERIES10_MAX=360
+SERIES60_MAX=1440
+# one point per hour, a week of them: the third tier the week view reads
+SERIES1H_MAX=168
+# Automatic maintenance, which is why the page has no "clear" button: clearing is
+# housekeeping, and a button on a dashboard is an invitation to throw the history
+# away by accident.  The collector bounds its own store instead - the history is
+# dropped once a calendar month, and again whenever <datadir> passes this many
+# megabytes.  Only history is dropped; the live counters are the session in
+# progress and are kept, so a purge never blanks what the page is showing.
+CFG_PURGE_MB=100
+
+# Bumped whenever a change alters what the live counters mean.  They are running
+# totals, so a change of meaning cannot be applied retroactively: after the fix
+# that stopped the box's own LAN address from being a client, an upgraded router
+# would otherwise keep showing "192.168.2.1" with tens of megabytes against it
+# forever, because that row is already in clients.tsv and is only ever added to.
+# On a mismatch the live counters are dropped and rebuilt; the history in
+# <datadir> (series60, hourly) is left alone.
+# 2: the series, the peak and the published total come from the WAN interface
+# counters rather than from the attribution, which under flow offloading is a
+# small fraction of the traffic.  The state that carries the old meaning is
+# dropped on upgrade - including the device baseline, because a delta measured
+# against a reading taken before the upgrade is not a delta of this session.
+# 3: the hourly archive carries the hour's interface total as well.  Its snapshot
+# (arch/wan.snap) does not exist on a router upgrading from 2, while wan.tsv
+# already holds the whole session - so the first roll would have archived the
+# session as one hour and the 1-hour view would have shown it as that hour's
+# traffic.  Dropping the live counters restarts the device baseline, the same
+# tradeoff as 2; the history in <datadir> is untouched, and the hours written
+# before the upgrade simply carry no interface row, which the page reads as an
+# attributed figure rather than as a total.
+STATE_VERSION=3
+
+log() { logger -t traffic "$*"; }
+
+# ---------------------------------------------------------------- configuration
+# Environment wins over uci, so the collector can be exercised offline (tests)
+# and overridden in the field without touching the config file.
+uci_get() {
+    local key="$1" v=
+
+    case "$key" in
+        enabled)        v=${TRAFFIC_ENABLED:-} ;;
+        interval)       v=${TRAFFIC_INTERVAL:-} ;;
+        datadir)        v=${TRAFFIC_DATADIR:-} ;;
+        querylog)       v=${TRAFFIC_QUERYLOG:-} ;;
+        lan4)           v=${TRAFFIC_LAN4:-} ;;
+        lan6)           v=${TRAFFIC_LAN6:-} ;;
+        self)           v=${TRAFFIC_SELF:-} ;;
+        wan_if)         v=${TRAFFIC_WAN_IF:-} ;;
+        accounting)     v=${TRAFFIC_ACCOUNTING:-} ;;
+        dnsmasq_log)    v=${TRAFFIC_DNSLOG:-} ;;
+        appmap)         v=${TRAFFIC_APPMAP:-} ;;
+        categories)     v=${TRAFFIC_CATEGORIES:-} ;;
+        retention_days) v=${TRAFFIC_RETENTION_DAYS:-} ;;
+        top_apps)       v=${TRAFFIC_TOP_APPS:-} ;;
+        top_clients)    v=${TRAFFIC_TOP_CLIENTS:-} ;;
+        resolve_interval) v=${TRAFFIC_RESOLVE:-} ;;
+        dnsmap_max)     v=${TRAFFIC_DNSMAP_MAX:-} ;;
+        purge_size_mb)  v=${TRAFFIC_PURGE_MB:-} ;;
+        icons_fetch)    v=${TRAFFIC_ICONS_FETCH:-} ;;
+        icons_url)      v=${TRAFFIC_ICONS_URL:-} ;;
+    esac
+    if [ -n "$v" ]; then printf '%s\n' "$v"; return 0; fi
+
+    [ -x "$UCI" ] && "$UCI" -q get "traffic.settings.$key" 2>/dev/null
+}
+
+detect_lan() {
+    # Prefer the LAN address the box actually has, so a user who renumbered
+    # their network does not have to configure anything.
+    local ip br
+    br=$(uci -q get network.lan.device 2>/dev/null)
+    [ -n "$br" ] || br=br-lan
+    ip=$(ip -4 addr show dev "$br" 2>/dev/null | awk '/inet /{print $2; exit}')
+    if [ -n "$ip" ]; then
+        ip=${ip%/*}
+        printf '%s.\n' "${ip%.*}"
+        return
+    fi
+    printf '192.168.1.\n'
+}
+
+detect_lan6() {
+    local ip br
+    br=$(uci -q get network.lan.device 2>/dev/null)
+    [ -n "$br" ] || br=br-lan
+    ip=$(ip -6 addr show dev "$br" scope global 2>/dev/null | awk '/inet6 /{print $2; exit}')
+    [ -n "$ip" ] || ip=$(ip -6 addr show dev "$br" 2>/dev/null | awk '/inet6 /{print $2; exit}')
+    if [ -n "$ip" ]; then
+        # first 3 hextets are enough to recognise the prefix
+        echo "$ip" | awk -F: '{printf "%s:%s:%s:\n", $1, $2, $3}'
+        return
+    fi
+    printf 'fd00::\n'
+}
+
+# Expand an IPv6 address to the eight-group form the kernel writes into
+# /proc/net/nf_conntrack.  "ip -6 addr" prints the compressed form, so a plain
+# string comparison against a conntrack address would never match.
+expand6() {
+    awk -v a="$1" '
+    function pad(s) { while (length(s) < 4) s = "0" s; return s }
+    BEGIN {
+        if (a == "") { print ""; exit }
+        if (a !~ /:/) { print a; exit }              # not IPv6
+        n = split(a, half, "::")
+        if (n == 1) {
+            m = split(a, g, ":")
+            out = ""
+            for (i = 1; i <= m; i++) out = out (i > 1 ? ":" : "") pad(g[i])
+            print out
+            exit
+        }
+        nl = (half[1] == "") ? 0 : split(half[1], L, ":")
+        nr = (half[2] == "") ? 0 : split(half[2], R, ":")
+        out = ""
+        for (i = 1; i <= nl; i++) out = out (out == "" ? "" : ":") pad(L[i])
+        for (i = nl + 1; i <= 8 - nr; i++) out = out (out == "" ? "" : ":") "0000"
+        for (i = 1; i <= nr; i++) out = out ":" pad(R[i])
+        print out
+    }'
+}
+
+# The addresses of the router itself on the LAN.  Traffic whose source is one of
+# these is the router talking, not a client: on a box that runs its own proxy it
+# is the outbound connections of that proxy, and counting them as a client put
+# "192.168.2.1" at the top of the client list with 40 MB against it.
+detect_self() {
+    local br a
+    br=$($UCI -q get network.lan.device 2>/dev/null)
+    [ -n "$br" ] || br=br-lan
+    ip -4 addr show dev "$br" 2>/dev/null | awk '/inet /{ sub(/\/.*/, "", $2); print $2 }'
+    ip -6 addr show dev "$br" 2>/dev/null | awk '/inet6 /{ sub(/\/.*/, "", $2); print $2 }' \
+        | while read -r a; do expand6 "$a"; done
+}
+
+detect_querylog() {
+    local wl
+    wl=$($UCI -q get AdGuardHome.AdGuardHome.workdir 2>/dev/null)
+    if [ -n "$wl" ] && [ -r "$wl/data/querylog.json" ]; then
+        printf '%s/data/querylog.json\n' "$wl"
+        return
+    fi
+    for wl in /etc/config/adGuardConfig/workspace /etc/AdGuardHome /var/lib/AdGuardHome; do
+        [ -r "$wl/data/querylog.json" ] && { printf '%s/data/querylog.json\n' "$wl"; return; }
+    done
+    printf '/etc/config/adGuardConfig/workspace/data/querylog.json\n'
+}
+
+# The dnsmasq query log, if one has been configured.  It is only written when
+# dnsmasq has both log-queries and a file log-facility, so the usual case is
+# "not there" and that is not an error.
+detect_dnslog() {
+    local f
+    for f in /tmp/dnsmasq.log /var/log/dnsmasq.log /tmp/dnsmasq/dnsmasq.log; do
+        [ -r "$f" ] && { printf '%s\n' "$f"; return; }
+    done
+}
+
+load_config() {
+    local v
+    v=$(uci_get enabled);      [ -n "$v" ] && CFG_ENABLED=$v
+    v=$(uci_get interval);     [ -n "$v" ] && CFG_INTERVAL=$v
+    v=$(uci_get datadir);      [ -n "$v" ] && CFG_DATADIR=$v
+    v=$(uci_get querylog);     [ -n "$v" ] && CFG_QUERYLOG=$v
+    [ -n "$CFG_QUERYLOG" ] || CFG_QUERYLOG=$(detect_querylog)
+    v=$(uci_get dnsmasq_log);  [ -n "$v" ] && CFG_DNSLOG=$v
+    [ -n "$CFG_DNSLOG" ] || CFG_DNSLOG=$(detect_dnslog)
+    v=$(uci_get lan4);         [ -n "$v" ] && CFG_LAN4=$v
+    [ -n "$CFG_LAN4" ] || CFG_LAN4=$(detect_lan)
+    v=$(uci_get lan6);         [ -n "$v" ] && CFG_LAN6=$v
+    [ -n "$CFG_LAN6" ] || CFG_LAN6=$(detect_lan6)
+    v=$(uci_get self);         [ -n "$v" ] && CFG_SELF=$v
+    v=$(uci_get accounting);   [ -n "$v" ] && CFG_ACCT=$v
+    [ -n "$CFG_SELF" ] || CFG_SELF=$(detect_self | tr '\n' ' ')
+    v=$(uci_get appmap);       [ -n "$v" ] && CFG_APPMAP=$v
+    [ -n "$CFG_APPMAP" ] || CFG_APPMAP=$CFG_DATADIR/apps.tsv
+    # the category table sits next to the application table, so relocating one
+    # relocates the other
+    v=$(uci_get categories);   [ -n "$v" ] && CFG_CATEGORIES=$v
+    [ -n "$CFG_CATEGORIES" ] || CFG_CATEGORIES="${CFG_APPMAP%/*}/categories.tsv"
+    v=$(uci_get retention_days); [ -n "$v" ] && CFG_RETENTION=$v
+    v=$(uci_get top_apps);       [ -n "$v" ] && CFG_TOP_APPS=$v
+    v=$(uci_get top_clients);    [ -n "$v" ] && CFG_TOP_CLIENTS=$v
+    v=$(uci_get icons_fetch);    [ -n "$v" ] && CFG_ICONS_FETCH=$v
+    v=$(uci_get icons_url);      [ -n "$v" ] && CFG_ICONS_URL=$v
+    v=$(uci_get resolve_interval); [ -n "$v" ] && CFG_RESOLVE=$v
+    v=$(uci_get dnsmap_max);     [ -n "$v" ] && CFG_DNSMAP_MAX=$v
+    v=$(uci_get purge_size_mb);  [ -n "$v" ] && CFG_PURGE_MB=$v
+
+    # sanity
+    case "$CFG_INTERVAL" in ''|*[!0-9]*) CFG_INTERVAL=10 ;; esac
+    [ "$CFG_INTERVAL" -lt 2 ] && CFG_INTERVAL=2
+    case "$CFG_RETENTION" in ''|*[!0-9]*) CFG_RETENTION=7 ;; esac
+    case "$CFG_TOP_APPS" in ''|*[!0-9]*) CFG_TOP_APPS=300 ;; esac
+    case "$CFG_TOP_CLIENTS" in ''|*[!0-9]*) CFG_TOP_CLIENTS=20 ;; esac
+    case "$CFG_ICONS_FETCH" in 1) ;; *) CFG_ICONS_FETCH=0 ;; esac
+    case "$CFG_RESOLVE" in ''|*[!0-9]*) CFG_RESOLVE=30 ;; esac
+    case "$CFG_DNSMAP_MAX" in ''|*[!0-9]*) CFG_DNSMAP_MAX=50000 ;; esac
+    case "$CFG_PURGE_MB" in ''|*[!0-9]*) CFG_PURGE_MB=100 ;; esac
+    # how many samples each tier keeps, from the configured interval
+    case "${TRAFFIC_SERIES_HOT:-}" in ''|*[!0-9]*) ;; *) CFG_SERIES_HOT=$TRAFFIC_SERIES_HOT ;; esac
+    case "${TRAFFIC_SERIES_COLD:-}" in ''|*[!0-9]*) ;; *) CFG_SERIES_COLD=$TRAFFIC_SERIES_COLD ;; esac
+    SERIES10_MAX=$((CFG_SERIES_HOT / CFG_INTERVAL))
+    [ "$SERIES10_MAX" -lt 2 ] && SERIES10_MAX=2
+    SERIES60_MAX=$((CFG_SERIES_COLD / 60))
+    [ "$SERIES60_MAX" -lt 2 ] && SERIES60_MAX=2
+}
+
+# ------------------------------------------------------------- maintenance
+# Drop the history once a month, and again when <datadir> grows past the limit.
+#
+# hourly.tsv is the file that actually grows without bound: an app row and a
+# client row per application and client, per hour, kept forever.  The two series
+# files are already bounded by their point counts, and the name maps live in
+# tmpfs and are bounded by dnsmap_max; they are cleared here too because they are
+# what the purge is meant to reclaim.
+#
+# Nothing in the live counters is touched.  They are the session in progress, and
+# dropping them would make the page fall back to zero for traffic that is still
+# on the wire - the opposite of what the page is for.
+auto_purge() {
+    local month kb limit why=
+
+    month=$(date +%Y-%m 2>/dev/null)
+    case "$month" in ''|*[!0-9-]*) month= ;; esac
+
+    kb=$(du -sk "$CFG_DATADIR" 2>/dev/null | awk '{ print $1 }')
+    case "$kb" in ''|*[!0-9]*) kb=0 ;; esac
+
+    # A missing marker is a fresh install, not a month boundary: writing it and
+    # doing nothing keeps the first run from wiping a store it never filled.
+    if [ -n "$month" ] && [ -s "$STATE_DIR/purge.month" ] &&
+       [ "$(cat "$STATE_DIR/purge.month" 2>/dev/null)" != "$month" ]; then
+        why="month"
+    fi
+    limit=$((CFG_PURGE_MB * 1024))
+    if [ "$limit" -gt 0 ] && [ "$kb" -ge "$limit" ]; then
+        # the size reason outranks the month one when both are true, because it is
+        # the one that needs the space back
+        why="size ${kb}KB"
+    fi
+
+    if [ -n "$why" ]; then
+        : > "$CFG_DATADIR/hourly.tsv"
+        : > "$CFG_DATADIR/series60.tsv"
+        : > "$CFG_DATADIR/series1h.tsv"
+        : > "$STATE_DIR/namemap.tsv"
+        : > "$STATE_DIR/dnsmap.tsv"
+        # The roll snapshot goes with the history it measured: it exists to say
+        # "everything up to here is already archived", and after this the whole
+        # session is unarchived again, so the next roll has to archive all of it.
+        rm -rf "$STATE_DIR/arch"
+        log "purged traffic history ($why)"
+    fi
+    [ -n "$month" ] && printf '%s\n' "$month" > "$STATE_DIR/purge.month"
+    return 0
+}
+
+# ---------------------------------------------------------------- state
+init_state() {
+    local v
+    mkdir -p "$STATE_DIR" "$CFG_DATADIR" "$STATE_DIR/arch" || exit 1
+    v=$(sed -n '1p' "$STATE_DIR/version" 2>/dev/null)
+    if [ "$v" != "$STATE_VERSION" ]; then
+        # The live counters are running totals, so a change in what they mean
+        # cannot be applied to the existing numbers - they have to be rebuilt.
+        # flow.state is kept on purpose: it is the conntrack baseline the next
+        # delta is measured against, and clearing it would count every open
+        # flow from zero once.
+        rm -f "$STATE_DIR/totals.tsv" "$STATE_DIR/clients.tsv" "$STATE_DIR/router.tsv" \
+              "$STATE_DIR/stat.tsv" "$STATE_DIR/ac.tsv" \
+              "$STATE_DIR/acct.tsv" "$STATE_DIR/acct.abs" "$STATE_DIR/acct.hosts" \
+              "$STATE_DIR/wan.abs" "$STATE_DIR/wan.tsv" "$STATE_DIR/wan.delta"
+        # the counters these snapshots were taken from are gone, so they would
+        # only produce a clamped-to-zero delta for the hour they are lost in
+        rm -rf "$STATE_DIR/arch"
+        mkdir -p "$STATE_DIR/arch"
+        printf '%s\n' "$STATE_VERSION" > "$STATE_DIR/version"
+        [ -n "$v" ] && log "state schema $v -> $STATE_VERSION: live counters reset"
+    fi
+    [ -f "$STATE_DIR/flow.state" ] || : > "$STATE_DIR/flow.state"
+    [ -f "$STATE_DIR/dnsmap.tsv" ] || : > "$STATE_DIR/dnsmap.tsv"
+    [ -f "$STATE_DIR/totals.tsv" ] || : > "$STATE_DIR/totals.tsv"
+    [ -f "$STATE_DIR/clients.tsv" ] || : > "$STATE_DIR/clients.tsv"
+    [ -f "$STATE_DIR/router.tsv" ] || : > "$STATE_DIR/router.tsv"
+    [ -f "$STATE_DIR/stat.tsv" ] || printf '0\n0\n0\n0\n' > "$STATE_DIR/stat.tsv"
+    [ -f "$STATE_DIR/ac.tsv" ] || : > "$STATE_DIR/ac.tsv"
+    [ -f "$STATE_DIR/namemap.tsv" ] || : > "$STATE_DIR/namemap.tsv"
+    [ -f "$STATE_DIR/series10.tsv" ] || : > "$STATE_DIR/series10.tsv"
+    [ -f "$STATE_DIR/minute.tsv" ] || printf '0\n0\n0\n' > "$STATE_DIR/minute.tsv"
+    [ -f "$CFG_DATADIR/series60.tsv" ] || : > "$CFG_DATADIR/series60.tsv"
+    [ -f "$CFG_DATADIR/series1h.tsv" ] || : > "$CFG_DATADIR/series1h.tsv"
+    [ -f "$STATE_DIR/meta" ] || printf '0\n0\n' > "$STATE_DIR/meta"
+    [ -f "$STATE_DIR/nmoff" ] || printf '0\n' > "$STATE_DIR/nmoff"
+    [ -f "$STATE_DIR/nmtime" ] || printf '0\n' > "$STATE_DIR/nmtime"
+    [ -f "$STATE_DIR/dnslog.off" ] || printf '0\n' > "$STATE_DIR/dnslog.off"
+    # completed rounds: a snapshot written at startup means collected_at alone no
+    # longer says whether a full round has run, and this is what both the page
+    # and the offline suite use to tell "started" from "working"
+    [ -f "$STATE_DIR/rounds" ] || printf '0\n' > "$STATE_DIR/rounds"
+    [ -f "$STATE_DIR/pending" ] || printf '0\n' > "$STATE_DIR/pending"
+    # the current hour bucket, written here so the page can always say which one
+    # it is showing (roll_hour rewrites it when the hour turns over)
+    [ -f "$STATE_DIR/hour" ] || date +%Y-%m-%dT%H > "$STATE_DIR/hour" 2>/dev/null
+    [ -f "$CFG_DATADIR/hourly.tsv" ] || : > "$CFG_DATADIR/hourly.tsv"
+}
+
+# ---------------------------------------------------------------- querylog
+poll_dns() {
+    local size off
+    [ -r "$CFG_QUERYLOG" ] || return 0
+    size=$(wc -c < "$CFG_QUERYLOG" 2>/dev/null || echo 0)
+    off=$(sed -n '1p' "$STATE_DIR/meta" 2>/dev/null)
+    case "$off" in ''|*[!0-9]*) off=0 ;; esac
+    # a rotated (smaller) file means we start over
+    [ "$size" -lt "$off" ] && off=0
+    if [ "$size" -gt "$off" ]; then
+        # Lower-cased on the way in: DNS names are case-insensitive, and a
+        # client that shouts must not miss the catalogue.  It also makes IPv6
+        # literals agree with the way conntrack writes them.  Doing it here
+        # keeps tolower() out of every awk program - busybox awk is not
+        # guaranteed to have it.
+        tail -c +$((off + 1)) "$CFG_QUERYLOG" 2>/dev/null \
+            | "$LUA" "$SELF_DIR/ans.lua" 2>/dev/null \
+            | tr 'A-Z' 'a-z' >> "$STATE_DIR/dnsmap.tsv"
+    fi
+    # Remember where we stopped.  A line still being written may be skipped;
+    # at one line per round that is not worth the complexity of buffering.
+    {
+        printf '%s\n' "$size"
+        sed -n '2p' "$STATE_DIR/meta" 2>/dev/null || echo 0
+    } > "$STATE_DIR/meta.new" && mv -f "$STATE_DIR/meta.new" "$STATE_DIR/meta"
+}
+
+# Read the dnsmasq query log as a second name source.
+#
+# AdGuard Home is not necessarily the resolver a client query reaches.  When
+# passwall has taken the system dnsmasq over (its helper_dnsmasq.lua "stretches"
+# dhcp.@dnsmasq[0] and installs its own conf-dir), the client talks to dnsmasq,
+# dnsmasq steers the proxied domains to the passwall DNS front-end, and only
+# the rest is forwarded on - by default to AdGuard Home, whose redirect mode is
+# literally named dnsmasq-upstream.  Two consequences for naming:
+#
+#   * a proxied domain is answered by passwall, so AdGuard never sees the query
+#     and its log cannot name that flow at all;
+#   * for the queries AdGuard does see, the client field is dnsmasq (127.0.0.1),
+#     not the device, so an exact client-to-name match is impossible.
+#
+# The dnsmasq log has both the real client address and the domains that never
+# reach AdGuard, so it is worth reading when it exists.  A query and its answer
+# are separate lines and the answer carries no client, so the client of the most
+# recent query for that name is used; interleaved queries for the same name from
+# two devices can therefore be attributed to the wrong one.  That is a rare case
+# and it still beats having no name at all.
+poll_dnsmasq() {
+    local size off
+    [ -n "$CFG_DNSLOG" ] || return 0
+    [ -r "$CFG_DNSLOG" ] || return 0
+    size=$(wc -c < "$CFG_DNSLOG" 2>/dev/null || echo 0)
+    off=$(sed -n '1p' "$STATE_DIR/dnslog.off" 2>/dev/null)
+    case "$off" in ''|*[!0-9]*) off=0 ;; esac
+    # a rotated (smaller) file means we start over
+    [ "$size" -lt "$off" ] && off=0
+    if [ "$size" -gt "$off" ]; then
+        tail -c +$((off + 1)) "$CFG_DNSLOG" 2>/dev/null | awk '
+            function isip(s) {
+                if (s ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) return 1
+                if (s ~ /:/ && s ~ /^[0-9a-fA-F:]+$/) return 1
+                return 0
+            }
+            {
+                for (i = 1; i <= NF; i++) {
+                    if ($i ~ /^query\[/) {
+                        d = $(i + 1)
+                        for (j = i; j <= NF; j++) if ($j == "from") c = $(j + 1)
+                        if (d != "" && c != "") who[d] = c
+                        next
+                    }
+                    if (($i == "reply" || $i == "cached") && $(i + 2) == "is") {
+                        d = $(i + 1); a = $(i + 3)
+                        if (d != "" && isip(a) && (d in who)) print who[d] "\t" d "\t" a
+                        next
+                    }
+                }
+            }' | tr 'A-Z' 'a-z' >> "$STATE_DIR/dnsmap.tsv"
+    fi
+    printf '%s\n' "$size" > "$STATE_DIR/dnslog.off.new" \
+        && mv -f "$STATE_DIR/dnslog.off.new" "$STATE_DIR/dnslog.off"
+}
+
+# ---------------------------------------------------------------- name resolution
+# The catalogues are large (apps.tsv is ~80k keys), so they are read only when
+# a host name is seen for the first time.  namemap.tsv then holds the answer:
+#
+#   <host name> <TAB> app|cat|site <TAB> <display name>
+#
+# classify() reads only that file, which is why the poll stays cheap no matter
+# how big the catalogue grows.
+
+# Fingerprint used to notice that the catalogue was replaced under us.
+catalog_fingerprint() {
+    printf '%s:%s\n' \
+        "$(wc -c < "$CFG_APPMAP" 2>/dev/null || echo 0)" \
+        "$(wc -c < "$CFG_CATEGORIES" 2>/dev/null || echo 0)"
+}
+
+# Resolve a batch of host names against the catalogue.  Prints namemap rows.
+resolve_batch() {
+    awk -v appmap="$CFG_APPMAP" -v catmap="$CFG_CATEGORIES" -v hosts="$1" '
+    # The registrable domain: the fallback label when a host name is in neither
+    # table.  A small public-suffix list is enough for that.
+    function app_of(d,   n, p, last2) {
+        if (d == "") return ""
+        n = split(d, p, ".")
+        if (n < 2) return d
+        last2 = p[n-1] "." p[n]
+        if (n >= 3 && (last2 == "com.cn" || last2 == "net.cn" || last2 == "org.cn" ||
+                       last2 == "edu.cn" || last2 == "gov.cn" || last2 == "co.jp" ||
+                       last2 == "co.uk" || last2 == "com.hk" || last2 == "com.tw" ||
+                       last2 == "co.kr"))
+            return p[n-2] "." last2
+        return last2
+    }
+    # Longest suffix that the table knows, walking one label at a time.  This is
+    # what keeps the lookup O(labels) instead of a scan over every key.
+    function longest(h, tab,   s, i) {
+        s = h
+        if (s in tab) return tab[s]
+        while ((i = index(s, ".")) > 0) {
+            s = substr(s, i + 1)
+            if (s in tab) return tab[s]
+        }
+        return ""
+    }
+    BEGIN {
+        while ((getline l < appmap) > 0) {
+            if (l ~ /^#/ || l == "") continue
+            split(l, f, "\t")
+            if (f[1] == "" || f[2] == "") continue
+            if (f[3] == "H") ahost[f[2]] = f[1]
+            else             asuf[f[2]] = f[1]
+        }
+        close(appmap)
+        while ((getline l < catmap) > 0) {
+            if (l ~ /^#/ || l == "") continue
+            split(l, f, "\t")
+            if (f[1] != "" && f[2] != "") csuf[f[2]] = f[1]
+        }
+        close(catmap)
+        while ((getline h < hosts) > 0) {
+            sub(/\r$/, "", h)
+            if (h == "") continue
+            if (h in ahost)      { print h "\tapp\t" ahost[h]; continue }
+            n = longest(h, asuf)
+            if (n != "")         { print h "\tapp\t" n; continue }
+            c = longest(h, csuf)
+            if (c != "")         { print h "\tcat\t" c; continue }
+            print h "\tsite\t" app_of(h)
+        }
+        close(hosts)
+    }' /dev/null
+}
+
+# Resolve the host names added since the last call.  Cheap when nothing is new,
+# which is the common case: the catalogue is loaded only for a fresh host name.
+resolve_names() {
+    local off size fp
+    [ -s "$STATE_DIR/dnsmap.tsv" ] || return 0
+
+    # A replaced catalogue invalidates every cached answer, so start over.  The
+    # whole known set is then re-resolved in a single batch.
+    fp=$(catalog_fingerprint)
+    if [ "$(cat "$STATE_DIR/catfp" 2>/dev/null)" != "$fp" ]; then
+        : > "$STATE_DIR/namemap.tsv"
+        printf '0\n' > "$STATE_DIR/nmoff"
+        printf '0\n' > "$STATE_DIR/nmtime"
+        printf '%s\n' "$fp" > "$STATE_DIR/catfp"
+        log "catalogue changed, re-resolving known host names"
+    fi
+    size=$(wc -c < "$STATE_DIR/dnsmap.tsv" 2>/dev/null || echo 0)
+    off=$(sed -n '1p' "$STATE_DIR/nmoff" 2>/dev/null)
+    case "$off" in ''|*[!0-9]*) off=0 ;; esac
+    [ "$size" -lt "$off" ] && off=0
+    # nothing new since the last pass: nothing can be pending either
+    [ "$size" -gt "$off" ] || { printf '0\n' > "$STATE_DIR/pending"; return 0; }
+
+    # Host names we have already answered are dropped here, not inside awk, so
+    # the batch stays proportional to what is genuinely new.
+    tail -c +$((off + 1)) "$STATE_DIR/dnsmap.tsv" 2>/dev/null \
+        | awk -F'\t' -v nm="$STATE_DIR/namemap.tsv" '
+            BEGIN {
+                while ((getline l < nm) > 0) {
+                    split(l, f, "\t")
+                    if (f[1] != "") known[f[1]] = 1
+                }
+                close(nm)
+            }
+            {
+                h = $2
+                sub(/\r$/, "", h)
+                if (h != "" && !(h in known) && !(h in got)) { got[h] = 1; print h }
+            }' > "$STATE_DIR/newhosts.txt" 2>/dev/null
+
+    if [ -s "$STATE_DIR/newhosts.txt" ]; then
+        local pending now last
+        pending=$(wc -l < "$STATE_DIR/newhosts.txt" 2>/dev/null || echo 0)
+        now=$(date +%s 2>/dev/null || echo 0)
+        last=$(sed -n '1p' "$STATE_DIR/nmtime" 2>/dev/null)
+        case "$last" in ''|*[!0-9]*) last=0 ;; esac
+        # Throttle: a handful of fresh names is not worth re-reading the whole
+        # catalogue.  The offset stays where it is so they are picked up on a
+        # later pass - until then they read as their registrable domain.  The
+        # page can cut that wait short: rpcd drops a flag when someone who is
+        # actually looking at the page asks for the names now.
+        if [ ! -f "$STATE_DIR/resolve.now" ] &&
+           [ "$pending" -lt 500 ] && [ $((now - last)) -lt "$CFG_RESOLVE" ]; then
+            printf '%s\n' "$pending" > "$STATE_DIR/pending"
+            return 0
+        fi
+        rm -f "$STATE_DIR/resolve.now"
+        resolve_batch "$STATE_DIR/newhosts.txt" >> "$STATE_DIR/namemap.tsv" 2>/dev/null
+        printf '%s\n' "$now" > "$STATE_DIR/nmtime.new" && mv -f "$STATE_DIR/nmtime.new" "$STATE_DIR/nmtime"
+    fi
+    printf '0\n' > "$STATE_DIR/pending"
+
+    printf '%s\n' "$size" > "$STATE_DIR/nmoff.new" && mv -f "$STATE_DIR/nmoff.new" "$STATE_DIR/nmoff"
+    return 0
+}
+
+# ---------------------------------------------------------------- conntrack deltas
+poll_ct() {
+    local now mono closed
+    now=$(date +%s)
+    mono=$(awk '{ printf "%.0f", $1*1000; exit }' "${TRAFFIC_PROC_UPTIME:-/proc/uptime}" 2>/dev/null)
+    closed=${TRAFFIC_CT_CLOSED:-/proc/net/nf_conntrack_closed}
+    rm -f "$STATE_DIR/flow.new" "$STATE_DIR/flow.delta"
+    if [ ! -r "$CT" ]; then
+        printf '{"available":false,"coverage":"conntrack_unavailable","sampled_at":%s}\n' "$now" > "$STATE_DIR/conntrack.json.new" &&
+            mv -f "$STATE_DIR/conntrack.json.new" "$STATE_DIR/conntrack.json"
+        return 1
+    fi
+    set -- "$CT"
+    [ ! -r "$closed" ] || set -- "$@" "$closed"
+    if awk -v state="$STATE_DIR/flow.state" -v delta="$STATE_DIR/flow.delta" \
+        -v newst="$STATE_DIR/flow.new" -v status="$STATE_DIR/conntrack.json.new" \
+        -v at="$now" -v mono="${mono:-0}" -v lan4="$CFG_LAN4" -v lan6="$CFG_LAN6" \
+        -v selfip="$CFG_SELF" -f "$SELF_DIR/connections.awk" "$@"; then
+        [ ! -f "$STATE_DIR/flow.new" ] || mv -f "$STATE_DIR/flow.new" "$STATE_DIR/flow.state"
+    else
+        # Keep the previous baseline, so the next valid round spans this gap.
+        rm -f "$STATE_DIR/flow.new" "$STATE_DIR/flow.delta"
+        printf '{"available":false,"coverage":"incomplete_snapshot","sampled_at":%s}\n' "$now" > "$STATE_DIR/conntrack.json.new"
+    fi
+    [ ! -f "$STATE_DIR/conntrack.json.new" ] || mv -f "$STATE_DIR/conntrack.json.new" "$STATE_DIR/conntrack.json"
+}
+
+collect_npu() {
+    local watch now payload rc
+    now=$(date +%s)
+    [ -r "$STATE_DIR/live.watch" ] || return 0
+    read -r watch < "$STATE_DIR/live.watch"
+    case "$watch" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$now" -ge "$watch" ] && [ "$((now-watch))" -le 60 ] || return 0
+    [ -x /usr/bin/mtk-tops-status ] && command -v timeout >/dev/null 2>&1 || return 0
+    payload=$(timeout 12 /usr/bin/mtk-tops-status 2>/dev/null)
+    rc=$?
+    now=$(date +%s)
+    if [ "$rc" -eq 0 ] && [ "${#payload}" -le 131072 ]; then
+        case "$payload" in
+            \{*) printf '{"sampled_at":%s,%s\n' "$now" "${payload#\{}" > "$STATE_DIR/npu.json.new" &&
+                mv -f "$STATE_DIR/npu.json.new" "$STATE_DIR/npu.json" ;;
+        esac
+    fi
+}
+
+# ---------------------------------------------------------------- per-host accounting
+# A byte counter per client, in the spirit of wrtbwmon: the router counts what
+# each host really sends and receives, with no dependence on DNS, on the
+# conntrack table or on nf_conntrack_acct being on.
+#
+# wrtbwmon counts in the FORWARD chain (RRDIPT_FORWARD in its readDB.awk).  That
+# is the one hook this deployment cannot use.  passwall keeps its own nft table
+# whose base chains are prerouting and output only (see gen_nft_tables in its
+# nftables.sh), and every proxied connection ends in "tproxy to :port" or
+# "redirect to :port", both of which hand it to a local socket.  Proxied client
+# traffic therefore travels PREROUTING to INPUT and never reaches FORWARD, so a
+# FORWARD counter would miss the bulk of what we want to measure - and AdGuard
+# Home DNS is redirected out of PREROUTING in exactly the same way.
+# (wrtbwmon's readDB.awk is also gawk-only: it dispatches on ARGIND, which
+# busybox awk does not have, so on this target it would do nothing at all and
+# report nothing.)
+#
+# The two hooks a packet from or to a LAN client crosses exactly once are:
+#
+#   upload    prerouting  priority raw   iifname <lan>  ip saddr <client>
+#   download  postrouting priority 101   oifname <lan>  ip daddr <client>
+#
+# Upload is matched by source and download by destination, and no packet matches
+# both, so a directly routed download is not counted twice.  Filtering on the
+# LAN interface keeps the proxy own sockets out of it, since those leave by the
+# WAN device.  The download hook has to be postrouting rather than prerouting:
+# the download half of a proxied connection is produced by a local socket and
+# leaves through OUTPUT, so it never appears in prerouting at all.
+#
+# One nft rule per client and direction is used, because a rule counter works on
+# every nftables in this tree whereas per-element map counters do not.  The rule
+# set is rebuilt only when the set of clients changes, and the counters are read
+# before any rebuild, so rebuilding does not lose the round.
+ACCT_TABLE=${ACCT_TABLE:-inet traffic_acct}
+
+# replaced by the Makefile at build time, so the page can show which collector
+# is running rather than making someone read the file on the router
+COLLECTOR_VERSION=dev
+
+acct_available() { command -v nft >/dev/null 2>&1; }
+
+# Every nft call is bounded.  nft takes the nftables lock, and any other writer
+# holding it - a firewall reload, passwall reconfiguring itself - would otherwise
+# block this call forever and freeze the whole collector loop with it.  That
+# failure looks like a page that never updates, with nothing in the log, which is
+# the worst way to fail; a bounded call turns it into a plain failure that the
+# fallback already handles.
+nft_run() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${NFT_TIMEOUT:-5}" nft "$@"
+    else
+        nft "$@"
+    fi
+}
+
+# The LAN device: what separates client traffic from the proxy own.
+detect_lan_dev() {
+    local br
+    br=$($UCI -q get network.lan.device 2>/dev/null)
+    [ -n "$br" ] || br=br-lan
+    printf '%s\n' "$br"
+}
+
+# Report, once per distinct reason, that the counters are unavailable.  The page
+# reads this from the snapshot, so a silent fallback does not look like a
+# working collector with suspiciously low numbers.
+acct_off() {
+    [ "$(sed -n '1p' "$STATE_DIR/acct.off" 2>/dev/null)" = "$1" ] && return 0
+    printf '%s\n' "$1" > "$STATE_DIR/acct.off"
+    log "per-host accounting off: $1"
+}
+
+# The hosts to count: every neighbour the kernel has on the LAN.  A failed or
+# incomplete entry is not a client, and the MAC check keeps junk out of the
+# rule set.
+CFG_ARPFILE=${TRAFFIC_ARPFILE:-/proc/net/arp}
+
+acct_hosts() {
+    if [ -r "$CFG_ARPFILE" ]; then
+        awk -v lan="$CFG_LAN4" '
+            NR > 1 && $3 != "0x0" && $4 ~ /^([0-9a-fA-F][0-9a-fA-F]:){5}[0-9a-fA-F][0-9a-fA-F]$/ {
+                if (lan == "" || index($1, lan) == 1) print $1
+            }' "$CFG_ARPFILE"
+    fi
+    if command -v ip >/dev/null 2>&1; then
+        ip -6 neigh show 2>/dev/null | awk -v lan="$CFG_LAN6" '
+            /^[0-9a-fA-F:]+[ \t]/ {
+                if ($0 ~ /(FAILED|INCOMPLETE)/) next
+                a = $1
+                sub(/%[^%]*$/, "", a)
+                if (lan == "" || index(a, lan) == 1) print a
+            }'
+    fi
+}
+
+# Keep the counting rules in step with the clients, without rebuilding them.
+#
+# A rule is added for a client that does not have one yet, and rules are left
+# alone otherwise.  The earlier version flushed and rebuilt the whole set
+# whenever the neighbour list changed, and that is expensive in a way that is
+# easy to miss: flushing resets every counter, so the traffic of the interval in
+# which the rebuild happens is not counted at all.  Neighbour entries expire
+# when a device goes quiet and come back when it speaks again, so on any real
+# network that rebuild happened often, and each one silently dropped one sample
+# worth of traffic for every client.
+#
+# Not deleting rules for hosts that have gone quiet is deliberate: the counters
+# stay where they were, so a device that returns continues from its old value
+# instead of starting over.
+#
+# The set is rebuilt from scratch only when it has to be - the table is gone (a
+# firewall reload flushes the whole ruleset), the LAN device changed, or the
+# rule set has grown past what a home network can plausibly need.
+ACCT_MAX_HOSTS=${ACCT_MAX_HOSTS:-300}
+
+acct_sync() {
+    local lan hosts known h n
+    lan=$(detect_lan_dev)
+    [ -n "$lan" ] || return 1
+    hosts=$(acct_hosts | sort -u | tr '\n' ' ')
+    known=$(cat "$STATE_DIR/acct.hosts" 2>/dev/null)
+
+    # shellcheck disable=SC2086
+    n=$(printf '%s' $known | wc -w)
+    if [ "$lan" != "$(cat "$STATE_DIR/acct.dev" 2>/dev/null)" ] ||
+       [ "$n" -gt "$ACCT_MAX_HOSTS" ] ||
+       ! nft_run list chain $ACCT_TABLE pre >/dev/null 2>&1 ||
+       ! nft_run list chain $ACCT_TABLE post >/dev/null 2>&1; then
+        known=""
+        nft_run add table $ACCT_TABLE 2>/dev/null
+        nft_run add chain $ACCT_TABLE pre '{ type filter hook prerouting priority raw; policy accept; }' 2>/dev/null
+        nft_run add chain $ACCT_TABLE post '{ type filter hook postrouting priority 101; policy accept; }' 2>/dev/null
+        nft_run list chain $ACCT_TABLE pre >/dev/null 2>&1 || return 1
+        nft_run list chain $ACCT_TABLE post >/dev/null 2>&1 || return 1
+        nft_run flush chain $ACCT_TABLE pre 2>/dev/null
+        nft_run flush chain $ACCT_TABLE post 2>/dev/null
+        # the counters just went back to zero, so the baseline has to go too
+        rm -f "$STATE_DIR/acct.abs"
+        printf '%s\n' "$lan" > "$STATE_DIR/acct.dev"
+    fi
+
+    for h in $hosts; do
+        case " $known " in *" $h "*) continue ;; esac
+        case "$h" in
+            *:*) nft_run add rule $ACCT_TABLE pre  iifname "$lan" ip6 saddr "$h" counter 2>/dev/null
+                 nft_run add rule $ACCT_TABLE post oifname "$lan" ip6 daddr "$h" counter 2>/dev/null ;;
+            *)   nft_run add rule $ACCT_TABLE pre  iifname "$lan" ip saddr "$h" counter 2>/dev/null
+                 nft_run add rule $ACCT_TABLE post oifname "$lan" ip daddr "$h" counter 2>/dev/null ;;
+        esac
+        known="$known $h"
+    done
+    printf '%s\n' "$known" > "$STATE_DIR/acct.hosts"
+    return 0
+}
+
+# Print "<address> <TAB> <bytes>" for every counting rule in one chain.  The
+# field order is searched rather than assumed, so it survives nft print changes.
+acct_read() {
+    local snapshot
+    # A failed nft call can still print part of a chain. Check its status
+    # before parsing; a pipe to awk would hide the error and lose the baseline
+    # for the missing direction, crediting its whole counter on the next read.
+    snapshot=$(nft_run list chain $ACCT_TABLE "$1" 2>/dev/null) || return 1
+    printf '%s\n' "$snapshot" | awk '
+        {
+            a = ""; b = ""
+            for (i = 1; i <= NF; i++) {
+                if ($i == "saddr" || $i == "daddr") a = $(i + 1)
+                else if ($i == "bytes") b = $(i + 1)
+            }
+            if (a != "" && b != "") print a "\t" b
+        }'
+}
+
+# Publish what the one-second sampler needs, so that it does not have to work
+# any of it out for itself.  The LAN prefixes come from the same detection this
+# script uses, and SOURCE names the counter layer that is authoritative on this
+# router: with flow offloading on, the nft counters miss almost everything
+# (measured here at 2.05 MiB against 535 MiB across br-lan for the same period),
+# so a sampler that guessed would publish a number that disagrees with the total
+# sitting next to it on the same page.  A second copy of this decision is
+# exactly how the icon normaliser drifted away from the icon generator and
+# started choosing the wrong marks.
+publish_live_env() {
+    local src
+    if [ "$ACCT_ON" = "1" ]; then src=nft; else src=conntrack; fi
+    {
+        printf 'LAN4=%s\n' "$CFG_LAN4"
+        printf 'LAN6=%s\n' "$CFG_LAN6"
+        printf 'SELF=%s\n' "$CFG_SELF"
+        printf 'SOURCE=%s\n' "$src"
+        printf 'TABLE=%s\n' "$ACCT_TABLE"
+        # The device the one-second sampler measures.  It publishes total
+        # throughput rather than attribution, and the interface counters are the
+        # only source for that which survives flow offloading - the same reason
+        # the series comes from here.
+        printf 'WAN_IF=%s\n' "$WAN_IF"
+    } > "$STATE_DIR/live.env.new" 2>/dev/null &&
+        mv -f "$STATE_DIR/live.env.new" "$STATE_DIR/live.env"
+    # A placeholder, so that "the file is not there" can never again be confused
+    # with "nothing has been sampled yet".  After the first round the file always
+    # exists and ready says whether a real sample has landed; the absence of the
+    # file was what made a page that simply was not asking look like a broken
+    # meter.
+    [ -s "$STATE_DIR/live.json" ] ||
+        printf '{"ready":0,"bps_down":0,"bps_up":0,"source":""}\n' > "$STATE_DIR/live.json" 2>/dev/null
+    return 0
+}
+
+# Turn the absolute counters into this round deltas and accumulate them per
+# client.  A counter that went backwards means the rules were rebuilt (a
+# firewall reload wipes our table), so the new value is used as the delta.
+account_clients() {
+    local m off offh counters
+    ACCT_ON=0
+    # Which layer produces the client totals is decided here, not only by the
+    # config, because the config cannot know what the firewall is doing.  Flow
+    # offloading hands established forwarded flows to a fast path that bypasses
+    # the netfilter hooks the nft counters hang on, so with it on those counters
+    # miss nearly everything a client sends - measured on a real router, 2.05 MiB
+    # counted against 535 MiB across br-lan for the same period - while conntrack
+    # accounting still records it.  That is also why the totals looked wrong on a
+    # router whose firewall has offloading on, which is the common default.
+    #
+    # 'auto' (the shipped value) follows the firewall setting; an explicit 0 or 1
+    # in the config always wins.
+    off=$(uci -q get firewall.@defaults[0].flow_offloading 2>/dev/null)
+    offh=$(uci -q get firewall.@defaults[0].flow_offloading_hw 2>/dev/null)
+    if [ "$off" = "1" ] || [ "$offh" = "1" ]; then ACCT_OFFLOAD=1; else ACCT_OFFLOAD=0; fi
+    case "$(uci_get accounting)" in
+        0) CFG_ACCT=0 ;;
+        1) CFG_ACCT=1 ;;
+        *) if [ "$ACCT_OFFLOAD" = "1" ]; then CFG_ACCT=0; else CFG_ACCT=1; fi ;;
+    esac
+    [ "$CFG_ACCT" = "1" ] || return 0
+    acct_available || { acct_off "nft is not installed"; return 0; }
+    acct_sync || { acct_off "the counter table could not be set up"; return 0; }
+    : > "$STATE_DIR/acct.new"
+    for m in pre post; do
+        if ! counters=$(acct_read "$m"); then
+            # Both directions form one snapshot. Keep the previous absolute
+            # and cumulative files intact until a complete read succeeds.
+            rm -f "$STATE_DIR/acct.new"
+            acct_off "the counter snapshot could not be read"
+            return 0
+        fi
+        printf '%s\n' "$counters" | awk -v m="$m" -F'\t' 'NF == 2 { print m "\t" $1 "\t" $2 }' >> "$STATE_DIR/acct.new"
+    done
+    ACCT_ON=1
+    rm -f "$STATE_DIR/acct.off"
+    : > "$STATE_DIR/acct_delta.tsv"
+
+    awk -F'\t' -v abs="$STATE_DIR/acct.abs" -v cum="$STATE_DIR/acct.tsv" \
+        -v dl="$STATE_DIR/acct_delta.tsv" '
+        BEGIN {
+            while ((getline l < abs) > 0) { split(l, f, "\t"); old[f[1] "|" f[2]] = f[3] + 0 }
+            close(abs)
+            while ((getline l < cum) > 0) {
+                split(l, f, "\t")
+                td[f[1]] = f[2] + 0; tu[f[1]] = f[3] + 0
+            }
+            close(cum)
+        }
+        {
+            b = $3 + 0
+            d = b - old[$1 "|" $2]
+            if (d < 0) d = b
+            if ($1 == "pre") up[$2] += d; else down[$2] += d
+            seen[$2] = 1
+        }
+        END {
+            for (ip in seen) {
+                td[ip] += down[ip]; tu[ip] += up[ip]
+                if (down[ip] + up[ip] > 0) printf "%s\t%.0f\t%.0f\n", ip, down[ip], up[ip] > dl
+            }
+            for (ip in td) printf "%s\t%.0f\t%.0f\n", ip, td[ip], tu[ip] > cum
+        }' "$STATE_DIR/acct.new" 2>/dev/null
+    mv -f "$STATE_DIR/acct.new" "$STATE_DIR/acct.abs"
+
+    # clients.tsv is what the page lists: when the counters are running they are
+    # the client totals, and conntrack only supplies the application attribution.
+    if [ "$ACCT_ON" = "1" ] && [ -f "$STATE_DIR/acct.tsv" ]; then
+        # BusyBox awk's %d saturates at 2147483647. Byte counts must use
+        # %.0f so both the TSV state and the JSON snapshot keep full integers.
+        awk -F'\t' '{ if ($2 + $3 > 0) printf "%s\t%.0f\t%.0f\t%.0f\n", $1, $2 + $3, $2, $3 }' \
+            "$STATE_DIR/acct.tsv" > "$STATE_DIR/clients.new" 2>/dev/null \
+            && mv -f "$STATE_DIR/clients.new" "$STATE_DIR/clients.tsv"
+    fi
+    return 0
+}
+
+# ------------------------------------------------------- WAN interface counters
+# Everything the attribution layer reports is a subset of the traffic, and on a
+# firewall that offloads it is a small one.  Established forwarded flows are
+# handed to a fast path that sits below the netfilter hooks the nft counters hang
+# on and below the point where conntrack accounts a flow's bytes, so both layers
+# only ever see the flows that did not take that path.  Measured on a real
+# router: conntrack recorded 147 MiB while the WAN device carried 2579 MiB over
+# the same window, i.e. 5.7%.  Turning the hardware offload off did not help
+# (208 MiB against 3063 MiB) because the software flowtable bypasses the same
+# hooks - which is why this cannot be fixed by telling the user to change a
+# firewall setting, and why the previous fallback from the nft counters to
+# conntrack, taken when offloading was detected, improved nothing at all.
+#
+# /proc/net/dev is maintained by the driver underneath that fast path, so it is
+# the one number that stays right whether or not the firewall offloads.  It
+# cannot say which application the traffic belonged to - that is what the
+# attribution is for - so the two are published side by side: the interface
+# counters are the total, and the attribution is a share of it.
+iface_stat() {
+    # "<rx_bytes> <tx_bytes>" for a device, or nothing when it is not there.
+    # One line, because default field splitting does the work: awk drops the
+    # leading blanks of a /proc/net/dev row and splits on runs of whitespace, so
+    # $1 is "eth2:" and $2 / $10 are the two byte counters.
+    awk -v d="$1:" '$1 == d { print $2 " " $10; exit }' "$PROC_NET_DEV" 2>/dev/null
+}
+
+# The default route names the device that carries the traffic.  Read from
+# /proc/net/route rather than by running "ip route": this costs one process per
+# round on the path that has to stay cheap, and the parse is exact.  An explicit
+# setting wins over the guess, because a guess that cannot be overridden is worse
+# than no guess at all.
+# A bridge's own counters do not see the frames the forwarding fast path moves.
+# Measured on the router this was written for: br-wan read 33.5 GiB received
+# against the member port's 100.1 GiB, and 1.0 GiB sent against 14.0 GiB - so
+# measuring the bridge under-reports by 3x in one direction and 13x in the other.
+# OpenWrt bridges the WAN by default (the route names br-wan), which means the
+# default was wrong on every such router and the only cure was a setting nobody
+# knows to make.  When the device the route names turns out to be a bridge, the
+# member port that has carried the most is the device actually moving traffic.
+#
+# The busiest member is chosen on cumulative bytes, not on this round's delta:
+# during a download the LAN-side port mirrors the same traffic, and a per-round
+# comparison could pick it and then keep switching between the two.
+bridge_member() {
+    local base=${TRAFFIC_SYS_NET:-/sys/class/net} m st rd tu v best= bestv=0
+
+    [ -d "$base/$1/brif" ] || return 1
+    for m in "$base/$1/brif"/*; do
+        [ -e "$m" ] || continue
+        m=${m##*/}
+        st=$(iface_stat "$m")
+        [ -n "$st" ] || continue
+        read -r rd tu <<EOF
+$st
+EOF
+        case "$rd" in ''|*[!0-9]*) continue ;; esac
+        case "$tu" in ''|*[!0-9]*) tu=0 ;; esac
+        v=$((rd + tu))
+        if [ -z "$best" ] || [ "$v" -gt "$bestv" ]; then best=$m; bestv=$v; fi
+    done
+    [ -n "$best" ] || return 1
+    printf '%s\n' "$best"
+}
+
+wan_if() {
+    local d m
+
+    d=$(uci_get wan_if)
+    if [ -n "$d" ]; then
+        case "$d" in *@*) d=${d##*@} ;; esac
+        if [ -n "$(iface_stat "$d")" ]; then WAN_IF=$d; return 0; fi
+    fi
+
+    d=
+    [ -r "$PROC_NET_ROUTE" ] &&
+        d=$(awk '$2 == "00000000" && $4 != "0000" { print $1; exit }' "$PROC_NET_ROUTE" 2>/dev/null)
+    if [ -z "$d" ] && [ -r "$PROC_NET_ROUTE6" ]; then
+        # the IPv6 default route: all-zero destination, zero prefix length
+        d=$(awk 'length($1) == 32 && $1 ~ /^0+$/ && $2 == "00" { print $10; exit }' "$PROC_NET_ROUTE6" 2>/dev/null)
+    fi
+    if [ -z "$d" ]; then
+        d=$(uci -q get network.wan.device 2>/dev/null)
+        case "$d" in *@*) d=${d##*@} ;; esac
+    fi
+    # Only a name that /proc/net/dev knows can be measured.  Anything else has to
+    # leave WAN_IF empty, so that the page falls back to the attributed numbers
+    # instead of being handed a total of zero.
+    [ -n "$d" ] || return 1
+    [ "$d" != "lo" ] || return 1
+    [ -n "$(iface_stat "$d")" ] || return 1
+    # A bridge is measured through the port that is really carrying the traffic.
+    m=$(bridge_member "$d")
+    [ -n "$m" ] && d=$m
+    WAN_IF=$d
+}
+
+# Fold the device counters into this session's totals.  Three files, all in RAM:
+#   wan.abs    the absolute reading the next delta is measured against
+#   wan.tsv    this session's cumulative <down>/<up>
+#   wan.delta  this round's increment, which is what the series is built from
+iface_account() {
+    local raw nd nu pd pu td tu cd cu
+
+    # Cleared first, so that wan.delta existing means one thing only: it is this
+    # round's interface delta.  Every path below that cannot measure this round
+    # returns with the file gone, and the series then falls back to the attributed
+    # sample - without this, a device that disappeared mid-session would leave the
+    # last delta on disk and the chart would keep drawing it every round.
+    rm -f "$STATE_DIR/wan.delta"
+    [ -n "$WAN_IF" ] || wan_if || return 0
+    raw=$(iface_stat "$WAN_IF")
+    [ -n "$raw" ] || return 0
+    read -r nd nu <<EOF
+$raw
+EOF
+    # A counter that is not a number is not a zero: leave the state alone rather
+    # than replacing a real total with one.
+    case "$nd" in ''|*[!0-9]*) return 0 ;; esac
+    case "$nu" in ''|*[!0-9]*) return 0 ;; esac
+
+    pd=; pu=
+    if [ -s "$STATE_DIR/wan.abs" ]; then
+        { read -r pd; read -r pu; } < "$STATE_DIR/wan.abs"
+    fi
+    case "$pd" in ''|*[!0-9]*) pd= ;; esac
+    case "$pu" in ''|*[!0-9]*) pu= ;; esac
+
+    # The very first reading is a baseline and contributes nothing.  These
+    # counters are the device's since it came up, which on a router that has been
+    # running for a week is a week of traffic; counting that as the session's
+    # first round would publish a total that never happened.
+    if [ -z "$pd" ] || [ -z "$pu" ]; then
+        cd=0; cu=0
+    elif [ "$nd" -lt "$pd" ] || [ "$nu" -lt "$pu" ]; then
+        # The device was taken down and re-created, so its counters started over.
+        # What it has counted since is traffic nothing has accounted for yet, and
+        # counting it is the only option that neither loses the round nor comes
+        # back as a negative delta added to an unsigned total.
+        cd=$nd; cu=$nu
+    else
+        cd=$((nd - pd)); cu=$((nu - pu))
+    fi
+
+    td=0; tu=0
+    if [ -s "$STATE_DIR/wan.tsv" ]; then
+        { read -r td; read -r tu; } < "$STATE_DIR/wan.tsv"
+    fi
+    case "$td" in ''|*[!0-9]*) td=0 ;; esac
+    case "$tu" in ''|*[!0-9]*) tu=0 ;; esac
+
+    printf '%s\n%s\n' "$((td + cd))" "$((tu + cu))" > "$STATE_DIR/wan.tsv.new" 2>/dev/null &&
+        mv -f "$STATE_DIR/wan.tsv.new" "$STATE_DIR/wan.tsv"
+    printf '%s\n%s\n' "$cd" "$cu" > "$STATE_DIR/wan.delta.new" 2>/dev/null &&
+        mv -f "$STATE_DIR/wan.delta.new" "$STATE_DIR/wan.delta"
+    printf '%s\n%s\n' "$nd" "$nu" > "$STATE_DIR/wan.abs.new" 2>/dev/null &&
+        mv -f "$STATE_DIR/wan.abs.new" "$STATE_DIR/wan.abs"
+    return 0
+}
+
+# ---------------------------------------------------------------- attribution
+classify() {
+    if [ ! -s "$STATE_DIR/flow.delta" ]; then
+        # No traffic this round is a fact worth recording: the series keeps a
+        # point for it, so a quiet spell reads as zero rather than as a gap.
+        printf '0\n0\n' > "$STATE_DIR/sample.new" && mv -f "$STATE_DIR/sample.new" "$STATE_DIR/sample.tsv"
+        return 0
+    fi
+    awk -v dns="$STATE_DIR/dnsmap.tsv" -v tot="$STATE_DIR/totals.tsv" \
+        -v cli="$STATE_DIR/clients.tsv" -v rt="$STATE_DIR/router.tsv" -v st="$STATE_DIR/stat.tsv" \
+        -v acfile="$STATE_DIR/ac.tsv" -v acnew="$STATE_DIR/ac.new" \
+        -v nmap="$STATE_DIR/namemap.tsv" -v smp="$STATE_DIR/sample.new" \
+        -v lan4="$CFG_LAN4" -v lan6="$CFG_LAN6" -v self="$CFG_SELF" -v acct="$ACCT_ON" '
+    # The registrable domain: what to show when a host name was in neither
+    # catalogue, i.e. an unidentified website.  A small public-suffix list is
+    # enough here.
+    function app_of(d,   n, p, last2) {
+        if (d == "") return ""
+        n = split(d, p, ".")
+        if (n < 2) return d
+        last2 = p[n-1] "." p[n]
+        if (n >= 3 && (last2 == "com.cn" || last2 == "net.cn" || last2 == "org.cn" ||
+                       last2 == "edu.cn" || last2 == "gov.cn" || last2 == "co.jp" ||
+                       last2 == "co.uk" || last2 == "com.hk" || last2 == "com.tw" ||
+                       last2 == "co.kr"))
+            return p[n-2] "." last2
+        return last2
+    }
+    # Last resort: what the protocol and port alone say.  This is the layer that
+    # turns an unnamed encrypted flow into "SSL/TLS" (or QUIC / HTTP / ...)
+    # rather than leaving it in an undifferentiated heap.
+    #
+    # Everything here is decidable from the 5-tuple, which is the honest limit
+    # of this design: a gateway that inspects payloads can also name media
+    # containers (FLV, MP4) and obscure protocols, and that is out of reach
+    # without deep packet inspection.
+    function proto_bucket(proto, port,   p) {
+        p = port + 0
+        if (proto == "icmp" || proto == "icmpv6" || proto == "ipv6-icmp") return "ICMP"
+        if (proto == "udp" && p == 443) return "QUIC"
+        if (proto == "tcp" && (p == 443 || p == 8443 || p == 9443)) return "SSL/TLS"
+        if (proto == "tcp" && (p == 80 || p == 8080 || p == 8000 || p == 8880)) return "HTTP"
+        if (p == 53 || p == 853 || p == 5353 || p == 5355) return "DNS"
+        if (proto == "udp" && (p == 3478 || p == 3479 || p == 3480 || p == 19302 || p == 5349)) return "STUN"
+        if (proto == "tcp" && (p == 554 || p == 8554)) return "RTSP"
+        if (proto == "tcp" && p == 1935) return "FLV"
+        if (p == 25 || p == 110 || p == 143 || p == 465 || p == 587 || p == 993 || p == 995) return "Email"
+        if (p == 22 || p == 2222) return "SSH"
+        if (p == 23) return "Telnet"
+        if (p == 20 || p == 21) return "FTP"
+        if (p == 3389) return "RDP"
+        if (p == 139 || p == 445) return "SMB"
+        if (p == 1883 || p == 8883) return "MQTT"
+        if (p == 1812 || p == 1813 || p == 1645 || p == 1646) return "RADIUS"
+        if (p == 5060 || p == 5061) return "SIP"
+        if (p == 1701) return "L2TP"
+        if (p == 1723) return "PPTP"
+        if (p == 500 || p == 4500) return "IPSec"
+        if (p == 1433) return "MSSQL"
+        if (p == 3306) return "MySQL"
+        if (p == 5432) return "PostgreSQL"
+        if (p == 6379) return "Redis"
+        if (p == 123) return "NTP"
+        if (p == 161 || p == 162) return "SNMP"
+        if (p == 67 || p == 68) return "DHCP"
+        return "Other"
+    }
+    BEGIN {
+        # the router own LAN addresses: a flow sourced by one of them is the
+        # box talking (mostly the outbound connections of a local proxy), not a
+        # client, so it belongs with the tunnel rather than in the client list
+        nself = split(self, slf, " ")
+        for (i = 1; i <= nself; i++) if (slf[i] != "") isself[slf[i]] = 1
+        while ((getline l < dns) > 0) {
+            split(l, f, "\t")
+            if (f[1] != "" && f[3] != "") { byclient[f[1] "|" f[3]] = f[2]; byip[f[3]] = f[2] }
+        }
+        close(dns)
+        # namemap.tsv, not the catalogues: resolve_names() has already turned
+        # every host name we have seen into app|cat|site plus a display name,
+        # so this file stays small and the poll stays cheap.
+        while ((getline l < nmap) > 0) {
+            split(l, f, "\t")
+            if (f[1] != "" && f[3] != "") nm[f[1]] = f[2] "\t" f[3]
+        }
+        close(nmap)
+        while ((getline l < tot) > 0) { split(l, f, "\t"); up[f[1]] = f[2] + 0; dn[f[1]] = f[3] + 0 }
+        close(tot)
+        while ((getline l < cli) > 0) { split(l, f, "\t"); cb[f[1]] = f[2] + 0 }
+        close(cli)
+        if ((getline l < rt) > 0) rb_total = l + 0        # router.tsv is a single running total
+        close(rt)
+        if ((getline l < st) > 0) { split(l, f, "\t"); m_c = f[1] + 0; m_g = f[2] + 0; k_b = f[3] + 0; k_o = f[4] + 0 }
+        close(st)
+        # per (application, client) totals, so the page can show which device
+        # drove an application and how many devices used it.
+        # NOTE: no apostrophes in comments inside an awk program - one would
+        # close the single-quoted program the shell is already inside.
+        while ((getline l < acfile) > 0) {
+            split(l, f, "\t")
+            if (f[1] != "" && f[2] != "") ac[f[1] "|" f[2]] = f[3] + 0
+        }
+        close(acfile)
+    }
+    {
+        split($1, k, "|")                 # family|proto|src|sport|dst|dport
+        proto = k[2]; src = k[3]; dst = k[5]; port = k[6]
+        u = $2 + 0; d = $3 + 0; t = u + d
+        if (t <= 0) next
+        # Not a client when the source is the router itself: either it is one of
+        # the box own addresses, or it is outside the LAN prefix (a WAN-sourced
+        # flow is the far end of the tunnel).
+        if (!((lan4 != "" && index(src, lan4) == 1) ||
+              (lan6 != "" && index(src, lan6) == 1)) || (src in isself)) {
+            if (!(dst in isself) && ((lan4 != "" && index(dst, lan4) == 1) ||
+                                    (lan6 != "" && index(dst, lan6) == 1))) {
+                peer=src; src=dst; dst=peer; port=k[4]
+                v=u; u=d; d=v
+            } else {
+                rb["proxy"] += t
+                next
+            }
+        }
+        cb[src] += t
+
+        # Which client resolved this destination decides "exact" vs "any".
+        dom = byclient[src "|" dst]; via = "exact"
+        if (dom == "") { dom = byip[dst]; via = "any" }
+
+        # The three kinds below must partition the client traffic, so the
+        # counters are bumped only once the kind is known.
+        if (dom == "") {
+            # no DNS answer for this destination: the protocol is all we have
+            a = proto_bucket(proto, port)
+            k_o += t
+        }
+        else {
+            # resolve_names() answered this host name already; the fallback only
+            # covers the first poll of a brand new name.
+            if (dom in nm) { split(nm[dom], np, "\t"); kind = np[1]; a = np[2] }
+            else           { kind = "site"; a = app_of(dom) }
+
+            if (kind == "cat") k_b += t
+            else if (via == "exact") m_c += t
+            else m_g += t
+        }
+        up[a] += u; dn[a] += d
+        ac[a "|" src] += t
+        # client-side throughput of this round, for the two-tier series; the
+        # proxy tunnel is excluded because what it carries is already counted
+        # on the client side of the flow
+        sd += d; su += u
+    }
+    END {
+        for (x in up) { if (up[x] + dn[x] > 0) printf "%s\t%.0f\t%.0f\n", x, up[x], dn[x] > tot }
+        # The client totals come from the nft counters when they are running:
+        # they see every packet, and the conntrack side of a proxied flow is not
+        # where its bytes end up.  Only when the counters are unavailable does
+        # the conntrack total stand in for them.
+        if (!acct) for (y in cb) { if (cb[y] > 0) printf "%s\t%.0f\n", y, cb[y] > cli }
+        printf "%.0f\n", rb_total + rb["proxy"] > rt
+        printf "%.0f\t%.0f\t%.0f\t%.0f\n", m_c, m_g, k_b, k_o > st
+        printf "%.0f\n%.0f\n", sd, su > smp
+        for (z in ac) {
+            if (ac[z] <= 0) continue
+            split(z, zp, "|")
+            printf "%s\t%s\t%.0f\n", zp[1], zp[2], ac[z] > acnew
+        }
+    }' "$STATE_DIR/flow.delta"
+    [ -f "$STATE_DIR/ac.new" ] && mv -f "$STATE_DIR/ac.new" "$STATE_DIR/ac.tsv"
+    [ -f "$STATE_DIR/sample.new" ] && mv -f "$STATE_DIR/sample.new" "$STATE_DIR/sample.tsv"
+    return 0
+}
+
+# ------------------------------------------------------------ 1 s peak tracker
+# The peak statistic on the page has to be a peak the data can actually support.
+# The series the chart draws holds one average per round, so the highest thing in
+# it is the highest round average: a 991 Mbps speed test that lasted about a
+# second divided by a ten second round reads 12.9 MiB/s, and the note beside the
+# curve called that the peak.  The one second samples are taken here anyway, so
+# the maximum of them is kept and published separately.
+
+# Parse the sample the tick loop just asked for.  This runs once a second, so it
+# is pure shell: a sed or an awk here would be another process charged to every
+# tick, which is the cost the meter was already fixed for once.
+peak_read() {
+    local lj d u at now token
+    # Tested before the read, not left to the redirect: a failed redirection is
+    # reported by the shell itself, so the 2>/dev/null on the read does not
+    # silence it, and this runs every second - a router that logged a missing
+    # file once a tick would write 86400 lines a day about nothing.
+    [ -r "$STATE_DIR/live.json" ] || return 0
+    IFS= read -r lj < "$STATE_DIR/live.json" 2>/dev/null || return 0
+    case "$lj" in
+        *'"ready":1'*) ;;
+        *) return 0 ;;
+    esac
+    at=${lj#*'"at":'}; at=${at%%[!0-9]*}
+    case "$at" in ''|*[!0-9]*|0[0-9]*) return 0 ;; esac
+    [ "${#at}" -le 12 ] || return 0
+    now=$(date +%s 2>/dev/null) || return 0
+    [ "$now" -ge "$at" ] && [ "$((now-at))" -le 5 ] || return 0
+    token=${lj#*'"monotonic_ms":'}; token=${token%%[!0-9]*}
+    case "$token" in ''|*[!0-9]*) token=$at ;; esac
+    [ "$token" != "${PEAK_LAST_SAMPLE:-}" ] || return 0
+    d=${lj#*'"bps_down":'}; d=${d%%[!0-9]*}
+    u=${lj#*'"bps_up":'};   u=${u%%[!0-9]*}
+    case "$d" in ''|*[!0-9]*) return 0 ;; esac
+    case "$u" in ''|*[!0-9]*) return 0 ;; esac
+    [ "${#d}" -le 15 ] && [ "${#u}" -le 15 ] || return 0
+    PEAK_LAST_SAMPLE=$token
+    [ "$d" -gt "${PEAK_D:-0}" ] && PEAK_D=$d
+    [ "$u" -gt "${PEAK_U:-0}" ] && PEAK_U=$u
+    PEAK_N=$(( ${PEAK_N:-0} + 1 ))
+    return 0
+}
+
+# Fold this round's maximum into the minute bucket the chart reads.  A maximum
+# aggregates losslessly across tiers, which is why the peak is carried beside the
+# series rather than inside its three files: summing tiers is where a silent
+# arithmetic bug would hide, taking a maximum cannot be got wrong.
+record_peak() {
+    local b
+    [ "${PEAK_N:-0}" -gt 0 ] || return 0
+    b=$(( ${PEAK_AT:-$(date +%s 2>/dev/null || echo 0)} / 60 * 60 ))
+    case "$b" in ''|*[!0-9]*) return 0 ;; esac
+    [ -f "$STATE_DIR/peaks.tsv" ] || : > "$STATE_DIR/peaks.tsv"
+    awk -F'\t' -v b="$b" -v d="$PEAK_D" -v u="$PEAK_U" -v n="$PEAK_N" -v keep="${PEAK_MAX:-10080}" '
+        { line[NR] = $0 }
+        END {
+            if (NR > 0) {
+                split(line[NR], f, "\t")
+                # the buckets only ever grow, so an equal bucket is the last row
+                if (f[1] + 0 == b) {
+                    if (f[2] + 0 > d) d = f[2] + 0
+                    if (f[3] + 0 > u) u = f[3] + 0
+                    n += f[4] + 0
+                    NR--
+                }
+            }
+            start = NR - keep + 1
+            if (start < 1) start = 1
+            for (i = start; i <= NR; i++) print line[i]
+            printf "%s\t%s\t%s\t%s\n", b, d, u, n
+        }' "$STATE_DIR/peaks.tsv" > "$STATE_DIR/peaks.new" 2>/dev/null &&
+        mv -f "$STATE_DIR/peaks.new" "$STATE_DIR/peaks.tsv"
+    PEAK_D=0; PEAK_U=0; PEAK_N=0
+    return 0
+}
+
+# ---------------------------------------------------------------- throughput series
+# One point per poll, in two tiers:
+#
+#   series10.tsv   10 s (or whatever interval is) for the last hour - sharp
+#   series60.tsv   1 minute for the last day, and it persists in <datadir> so
+#                  the day's context survives a reboot
+#
+# A point is <epoch> <TAB> <down bytes> <TAB> <up bytes> in that round.  The
+# minute tier is the sum of the 10 s points inside it, flushed when the minute
+# rolls over.
+record_sample() {
+    local ts="${1:-}" d u m cur_m cd cu n
+    [ -n "$ts" ] || ts=$(date +%s 2>/dev/null || echo 0)
+    # The point this series keeps is what the box actually carried, so it comes
+    # from the interface counters.  The attribution cannot supply it: it is a
+    # subset of the traffic, and a small one while the firewall offloads, which is
+    # what made a gigabit transfer draw as a flat line.  The attributed sample is
+    # kept as the fallback for the case where no WAN device could be identified,
+    # where it is still better than publishing a series of zeroes.
+    d=; u=
+    if [ -s "$STATE_DIR/wan.delta" ]; then
+        { read -r d; read -r u; } < "$STATE_DIR/wan.delta"
+    fi
+    case "$d" in ''|*[!0-9]*) d= ;; esac
+    case "$u" in ''|*[!0-9]*) u= ;; esac
+    if [ -z "$d" ] || [ -z "$u" ]; then
+        d=0; u=0
+        if [ -s "$STATE_DIR/sample.tsv" ]; then
+            { read -r d; read -r u; } < "$STATE_DIR/sample.tsv"
+        fi
+        case "$d" in ''|*[!0-9]*) d=0 ;; esac
+        case "$u" in ''|*[!0-9]*) u=0 ;; esac
+    fi
+
+    printf '%s\t%s\t%s\n' "$ts" "$d" "$u" >> "$STATE_DIR/series10.tsv"
+    # The ring only needs trimming once it can have overrun, and counting the
+    # lines costs a process: check every 60th sample instead of every sample.
+    SAMPLE_N=$(( ${SAMPLE_N:-0} + 1 ))
+    if [ $((SAMPLE_N % 60)) -eq 0 ]; then
+        n=$(wc -l < "$STATE_DIR/series10.tsv" 2>/dev/null || echo 0)
+        if [ "$n" -gt "$SERIES10_MAX" ]; then
+            tail -n "$SERIES10_MAX" "$STATE_DIR/series10.tsv" > "$STATE_DIR/series10.new" 2>/dev/null \
+                && mv -f "$STATE_DIR/series10.new" "$STATE_DIR/series10.tsv"
+        fi
+    fi
+
+    m=$((ts / 60 * 60))
+    cur_m=0; cd=0; cu=0
+    if [ -s "$STATE_DIR/minute.tsv" ]; then
+        { read -r cur_m; read -r cd; read -r cu; } < "$STATE_DIR/minute.tsv"
+    fi
+    case "$cur_m" in ''|*[!0-9]*) cur_m=0 ;; esac
+    case "$cd" in ''|*[!0-9]*) cd=0 ;; esac
+    case "$cu" in ''|*[!0-9]*) cu=0 ;; esac
+
+    if [ "$cur_m" -gt 0 ] && [ "$cur_m" != "$m" ]; then
+        # The minute that just ended is complete.  It is written even when it
+        # carried nothing: the chart distinguishes a quiet zero-rate minute
+        # from a missing sample, which is drawn as a visible gap.
+        #
+        # Trimming and appending happen in one rewrite and one rename, so the
+        # ring is never over its cap and never half-written: a collector killed
+        # mid-round leaves either the old file or the new one, both of them
+        # within the window.
+        awk -F'\t' -v keep="$((SERIES60_MAX - 1))" -v p="$cur_m" -v d="$cd" -v u="$cu" '
+            { line[NR] = $0 }
+            END {
+                start = NR - keep + 1
+                if (start < 1) start = 1
+                for (i = start; i <= NR; i++) print line[i]
+                printf "%s\t%s\t%s\n", p, d, u
+            }' "$CFG_DATADIR/series60.tsv" > "$CFG_DATADIR/.series60.new" 2>/dev/null \
+            && mv -f "$CFG_DATADIR/.series60.new" "$CFG_DATADIR/series60.tsv"
+        cd=0; cu=0; cur_m=$m
+    fi
+    [ "$cur_m" -gt 0 ] || cur_m=$m
+    printf '%s\n%s\n%s\n' "$cur_m" "$((cd + d))" "$((cu + u))" > "$STATE_DIR/minute.tsv"
+    return 0
+}
+
+# ------------------------------------------------------------- hour in progress
+# Publish the part of the current hour the archive does not have yet: the
+# difference between the live counters and the snapshot the last roll took.
+# The archive only gets its first row when the clock crosses the hour, so a
+# range view - which reads the archive - had nothing to show for the first hour
+# after an install or a reflash, while the collector was measuring perfectly
+# well.  This is the same difference roll_hour archives, so nothing is counted
+# twice: what is already in the archive is subtracted out.  It lives in /tmp and
+# never touches the overlay, because it is written every round.
+publish_current() {
+    local arch="$STATE_DIR/arch" hour hr shr wd wu swd swu dwd dwu
+    hour=$(date +%Y-%m-%dT%H 2>/dev/null)
+    [ -n "$hour" ] || return 0
+    mkdir -p "$arch" 2>/dev/null
+
+    # applications: totals.tsv is <name> up down, cur.apps is <name> down up
+    # (plus the busiest client, its bytes and the client count when ac.agg has
+    # them).  Without those three the hour in progress - which is the whole of
+    # what a range view has for the first hour after an install - could never
+    # name a client, so those columns stayed empty until the clock crossed the
+    # hour and roll_hour wrote the archived form of the same row.
+    #
+    # The client named here is the session's busiest for that application rather
+    # than strictly this hour's: ac.agg is a live aggregate with no time window.
+    # It is the same client that has dominated the hour in practice, and a name
+    # that is right in the ordinary case beats a dash that is always right.
+    awk -F'\t' -v snap="$arch/totals.tsv" -v agg="$STATE_DIR/ac.agg" '
+        BEGIN {
+            while ((getline l < snap) > 0) {
+                split(l, f, "\t"); su[f[1]] = f[2] + 0; sd[f[1]] = f[3] + 0
+            }
+            close(snap)
+            while ((getline l < agg) > 0) {
+                split(l, f, "\t")
+                if (f[1] != "") { ac[f[1]] = f[2] + 0; ab[f[1]] = f[3] + 0; aw[f[1]] = f[4] }
+            }
+            close(agg)
+        }
+        {
+            u = $2 - su[$1]; d = $3 - sd[$1]
+            if (u < 0) u = 0
+            if (d < 0) d = 0
+            if (u + d > 0) {
+                if (aw[$1] != "") printf "%s\t%.0f\t%.0f\t%s\t%.0f\t%.0f\n", $1, d, u, aw[$1], ab[$1], ac[$1]
+                else printf "%s\t%.0f\t%.0f\n", $1, d, u
+            }
+        }' "$STATE_DIR/totals.tsv" > "$STATE_DIR/cur.apps.new" 2>/dev/null \
+        && mv -f "$STATE_DIR/cur.apps.new" "$STATE_DIR/cur.apps"
+
+    # clients: acct.tsv is <ip> down up, and the page reads one figure per client
+    awk -F'\t' -v snap="$arch/acct.tsv" '
+        BEGIN {
+            while ((getline l < snap) > 0) {
+                split(l, f, "\t"); sd[f[1]] = f[2] + 0; su[f[1]] = f[3] + 0
+            }
+            close(snap)
+        }
+        {
+            d = $2 - sd[$1]; u = $3 - su[$1]
+            if (d < 0) d = 0
+            if (u < 0) u = 0
+            if (d + u > 0) printf "%s\t%.0f\n", $1, d + u
+        }' "$STATE_DIR/acct.tsv" > "$STATE_DIR/cur.clients.new" 2>/dev/null \
+        && mv -f "$STATE_DIR/cur.clients.new" "$STATE_DIR/cur.clients"
+
+    # the traffic the box itself carried, a single running number
+    hr=$(sed -n '1p' "$STATE_DIR/router.tsv" 2>/dev/null)
+    case "$hr" in ''|*[!0-9]*) hr=0 ;; esac
+    shr=$(sed -n '1p' "$arch/router" 2>/dev/null)
+    case "$shr" in ''|*[!0-9]*) shr=0 ;; esac
+    [ "$hr" -ge "$shr" ] || shr=0
+    printf '%s\n' "$((hr - shr))" > "$STATE_DIR/cur.router.new" 2>/dev/null \
+        && mv -f "$STATE_DIR/cur.router.new" "$STATE_DIR/cur.router"
+
+    # The hour in progress in the device counters, differenced against the same
+    # snapshot roll_hour advances: this is what lets a range view total up the
+    # current hour from the interface rather than from the attribution.  The
+    # session cumulative count must not be used here - inside a range it would
+    # both repeat the part the archive already holds and mix a session reading
+    # into an hour of it.
+    #
+    # Written only when the counters were actually measured, and removed when
+    # they were not: the absence of the file is what tells the backend to leave
+    # the field off the bucket, and the page to fall back to the attributed
+    # numbers rather than show a range as carrying nothing.
+    if [ -n "$WAN_IF" ] && [ -s "$STATE_DIR/wan.tsv" ]; then
+        { read -r wd; read -r wu; } < "$STATE_DIR/wan.tsv"
+        case "$wd" in ''|*[!0-9]*) wd=0 ;; esac
+        case "$wu" in ''|*[!0-9]*) wu=0 ;; esac
+        swd=$(sed -n '1p' "$arch/wan.snap" 2>/dev/null)
+        swu=$(sed -n '2p' "$arch/wan.snap" 2>/dev/null)
+        case "$swd" in ''|*[!0-9]*) swd=0 ;; esac
+        case "$swu" in ''|*[!0-9]*) swu=0 ;; esac
+        dwd=$((wd - swd)); [ "$dwd" -ge 0 ] || dwd=0
+        dwu=$((wu - swu)); [ "$dwu" -ge 0 ] || dwu=0
+        printf '%s\n%s\n' "$dwd" "$dwu" > "$STATE_DIR/cur.iface.new" 2>/dev/null \
+            && mv -f "$STATE_DIR/cur.iface.new" "$STATE_DIR/cur.iface"
+    else
+        rm -f "$STATE_DIR/cur.iface"
+    fi
+
+    printf '%s\n' "$hour" > "$STATE_DIR/cur.hour.new" 2>/dev/null \
+        && mv -f "$STATE_DIR/cur.hour.new" "$STATE_DIR/cur.hour"
+    return 0
+}
+
+# ---------------------------------------------------------------- hour rollover
+# Close the hour: append what the last hour carried to the persistent history.
+#
+# The live counters are deliberately NOT reset here.  They are the session the
+# page shows, and zeroing them is what made the table appear to lose traffic on
+# its own: the page reads the live totals, so at the top of every hour they fell
+# back to whatever had arrived since that moment.  The history still has to hold
+# one hour of bytes per row, so instead of resetting, this takes the difference
+# between the live counters and a snapshot written at the previous roll.  Each
+# hour records only its own traffic and the session total keeps growing, which is
+# what the page implies it does.
+#
+# The snapshot lives in $STATE_DIR/arch and is only ever compared against, never
+# shown.  A counter that went backwards - the rules were rebuilt, or the state
+# directory was reset while the snapshot stayed on disk - is clamped to zero
+# rather than archived as a negative or a wrapped number.
+roll_hour() {
+    local hour now hr shr dhr n arch="$STATE_DIR/arch"
+    local wd wu swd swu dwd dwu
+    now=$(date +%s 2>/dev/null || echo 0)
+    hour=$(date +%Y-%m-%dT%H 2>/dev/null)
+    [ -n "$hour" ] || hour="h$now"
+    mkdir -p "$arch" 2>/dev/null
+
+    # router.tsv is a single running total, so a plain subtraction is the delta.
+    hr=$(sed -n '1p' "$STATE_DIR/router.tsv" 2>/dev/null)
+    case "$hr" in ''|*[!0-9]*) hr=0 ;; esac
+    shr=$(sed -n '1p' "$arch/router" 2>/dev/null)
+    case "$shr" in ''|*[!0-9]*) shr=0 ;; esac
+    dhr=$((hr - shr))
+    [ "$dhr" -ge 0 ] || dhr=0
+
+    # The interface counters, differenced exactly the way the router total above
+    # is, and for the same reason: wan.tsv is a running total for the session
+    # while the archive keeps one hour per row.  This row is the only place a
+    # range view can get a total that flow offloading did not shrink - the app
+    # rows in this same file are the attribution, which on the router this exists
+    # for recorded 6% of what the device carried.  The snapshot is a separate
+    # file from the other archives because the counters it measures are separate.
+    #
+    # A missing snapshot means the session has never been archived, so the whole
+    # of it belongs to this hour; a counter that went backwards - the state
+    # directory was reset while the snapshot survived - is clamped instead of
+    # being archived as a wrapped number.
+    wd=0; wu=0
+    if [ -s "$STATE_DIR/wan.tsv" ]; then
+        { read -r wd; read -r wu; } < "$STATE_DIR/wan.tsv"
+    fi
+    case "$wd" in ''|*[!0-9]*) wd=0 ;; esac
+    case "$wu" in ''|*[!0-9]*) wu=0 ;; esac
+    swd=$(sed -n '1p' "$arch/wan.snap" 2>/dev/null)
+    swu=$(sed -n '2p' "$arch/wan.snap" 2>/dev/null)
+    case "$swd" in ''|*[!0-9]*) swd=0 ;; esac
+    case "$swu" in ''|*[!0-9]*) swu=0 ;; esac
+    dwd=$((wd - swd))
+    [ "$dwd" -ge 0 ] || dwd=0
+    dwu=$((wu - swu))
+    [ "$dwu" -ge 0 ] || dwu=0
+
+    # The applications, and the week-tier point, in one pass over the totals.
+    #
+    # totals.tsv is <name>\t<up>\t<down>, while hourly.tsv - and everything that
+    # reads it - is <hour>\t<kind>\t<name>\t<down>\t<up>.  The two columns are
+    # therefore written in the opposite order here on purpose: copying them
+    # straight across swaps download and upload in the hourly view.
+    #
+    # One throughput point per hour, for the week-long view.  The app rows are
+    # the classified client traffic and the router total is what the box itself
+    # carried; together they are the hour.  The client rows are a breakdown of
+    # the app rows, so adding those as well would count the same bytes twice.
+    # Stored as a point rather than aggregated from hourly.tsv on demand, because
+    # that file keys hours by a timestamp string, and turning "2026-09-16T16"
+    # back into an epoch needs a date parser the week view should not depend on.
+    #
+    # A row with no traffic this hour is left out rather than archived as a zero:
+    # the hour is reconstructed by summing what is there, and a name that was
+    # idle for an hour does not need a line saying so.
+    : > "$arch/point"
+    awk -F'\t' -v h="$hour" -v snap="$arch/totals.tsv" -v rt="$dhr" \
+        -v t="$now" -v pt="$arch/point" '
+        BEGIN {
+            while ((getline l < snap) > 0) {
+                split(l, f, "\t")
+                su[f[1]] = f[2] + 0; sd[f[1]] = f[3] + 0
+            }
+            close(snap)
+        }
+        {
+            u = $2 - su[$1]; d = $3 - sd[$1]
+            if (u < 0) u = 0
+            if (d < 0) d = 0
+            if (u + d <= 0) next
+            printf "%s\tapp\t%s\t%.0f\t%.0f\n", h, $1, d, u
+            td += d; tu += u
+        }
+        END { printf "%s\t%.0f\t%.0f\n", t, td + rt, tu > pt }
+    ' "$STATE_DIR/totals.tsv" >> "$CFG_DATADIR/hourly.tsv"
+    cat "$arch/point" >> "$CFG_DATADIR/series1h.tsv" 2>/dev/null
+    n=$(wc -l < "$CFG_DATADIR/series1h.tsv" 2>/dev/null || echo 0)
+    if [ "$n" -gt "$SERIES1H_MAX" ]; then
+        tail -n "$SERIES1H_MAX" "$CFG_DATADIR/series1h.tsv" > "$CFG_DATADIR/.series1h.new" 2>/dev/null \
+            && mv -f "$CFG_DATADIR/.series1h.new" "$CFG_DATADIR/series1h.tsv"
+    fi
+
+    # Clients.  With the per-host counters running, acct.tsv is the same kind of
+    # running total as totals.tsv and is differenced the same way - clients.tsv
+    # is only its rendering for the live table, and re-differencing that would
+    # compare a derived file with itself.  Without the counters, the conntrack
+    # column in clients.tsv is all there is.
+    if [ -s "$STATE_DIR/acct.tsv" ]; then
+        awk -F'\t' -v h="$hour" -v snap="$arch/acct.tsv" '
+            BEGIN {
+                while ((getline l < snap) > 0) {
+                    split(l, f, "\t")
+                    sd[f[1]] = f[2] + 0; su[f[1]] = f[3] + 0
+                }
+                close(snap)
+            }
+            {
+                d = $2 - sd[$1]; u = $3 - su[$1]
+                if (d < 0) d = 0
+                if (u < 0) u = 0
+                if (d + u <= 0) next
+                # the reader of these rows only ever uses the down column, so the
+                # two directions go there as one figure
+                printf "%s\tclient\t%s\t%.0f\t0\n", h, $1, d + u
+            }
+        ' "$STATE_DIR/acct.tsv" >> "$CFG_DATADIR/hourly.tsv"
+    elif [ -s "$STATE_DIR/clients.tsv" ]; then
+        awk -F'\t' -v h="$hour" -v snap="$arch/clients.tsv" '
+            BEGIN {
+                while ((getline l < snap) > 0) { split(l, f, "\t"); sb[f[1]] = f[2] + 0 }
+                close(snap)
+            }
+            {
+                b = $2 - sb[$1]
+                if (b < 0) b = 0
+                if (b > 0) printf "%s\tclient\t%s\t%.0f\t0\n", h, $1, b
+            }
+        ' "$STATE_DIR/clients.tsv" >> "$CFG_DATADIR/hourly.tsv"
+    fi
+
+    # The busiest client of each application, so a range view can name it.  The
+    # archive holds app rows and client rows but not the correlation between
+    # them, which is why every per-application client column was a dash in a
+    # range and only the session view could fill it.  ac.agg is where the
+    # collector already keeps that correlation: <app> <count> <bytes> <client>.
+    # The client is stored as the address it is; the page turns it into a device
+    # name from the live summary, which carries the lease names anyway.
+    #
+    # This deliberately sits outside the branch above.  ac.agg comes from ac.tsv,
+    # which is written from the flow log on every poll whichever layer produced
+    # the client totals, so the correlation exists in both counter modes.  Inside
+    # the elif it was reachable only when acct.tsv was empty - that is, only when
+    # the nft counters were off - so on a router running them no archived hour
+    # ever carried a busiest client and every range view showed a dash.
+    if [ -s "$STATE_DIR/ac.agg" ]; then
+        awk -F'\t' -v h="$hour" '
+            $1 != "" && $4 != "" { printf "%s\tapptop\t%s\t%s\t%.0f\t%.0f\n", h, $1, $4, $3 + 0, $2 + 0 }
+        ' "$STATE_DIR/ac.agg" >> "$CFG_DATADIR/hourly.tsv"
+    fi
+
+    if [ "$dhr" -gt 0 ]; then
+        printf '%s\trouter\tproxy\t%s\t0\n' "$hour" "$dhr" >> "$CFG_DATADIR/hourly.tsv"
+    fi
+
+    # The interface counters for this hour, as one more kind of row.  The name
+    # column is a placeholder: this row is a total and not an application, so
+    # every reader keys on the kind and keeps it out of the app and client
+    # lists - a row named "-" in the application table is the failure mode this
+    # avoids.  Written only when the hour carried something, which is exactly
+    # how the router row above keeps a repeated roll of the same hour from
+    # archiving the same bytes twice.
+    if [ "$dwd" -gt 0 ] || [ "$dwu" -gt 0 ]; then
+        printf '%s\twan\t-\t%s\t%s\n' "$hour" "$dwd" "$dwu" >> "$CFG_DATADIR/hourly.tsv"
+    fi
+
+    # The snapshot is taken after the history has been appended, so a failure to
+    # write cannot also lose the bytes it was about to record.
+    cp -f "$STATE_DIR/totals.tsv"  "$arch/totals.tsv"  2>/dev/null
+    cp -f "$STATE_DIR/acct.tsv"    "$arch/acct.tsv"    2>/dev/null
+    cp -f "$STATE_DIR/clients.tsv" "$arch/clients.tsv" 2>/dev/null
+    printf '%s\n' "$hr" > "$arch/router" 2>/dev/null
+    printf '%s\n%s\n' "$wd" "$wu" > "$arch/wan.snap" 2>/dev/null
+
+    prune_hourly
+    prune_dnsmap
+    printf '%s\n' "$hour" > "$STATE_DIR/hour"
+    log "hourly bucket $hour written"
+}
+
+# Bound the (client, host, ip) map.  It only grows while the box is up, and
+# classify() reads it on every poll, so a busy network would slowly make every
+# poll more expensive.  Names already resolved live in namemap.tsv and survive
+# this, so a pruned entry degrades to "no DNS answer" for that address only.
+prune_dnsmap() {
+    local max=$CFG_DNSMAP_MAX n
+    [ "$max" -gt 0 ] || return 0
+    n=$(wc -l < "$STATE_DIR/dnsmap.tsv" 2>/dev/null || echo 0)
+    [ "$n" -gt "$max" ] || return 0
+    tail -n "$max" "$STATE_DIR/dnsmap.tsv" > "$STATE_DIR/dnsmap.new" 2>/dev/null \
+        && mv -f "$STATE_DIR/dnsmap.new" "$STATE_DIR/dnsmap.tsv"
+    # byte offsets into the file are meaningless after a rewrite
+    printf '0\n' > "$STATE_DIR/nmoff"
+    log "dnsmap pruned: $n -> $max entries"
+}
+
+# Keep only the newest $CFG_RETENTION*24 distinct hours.
+prune_hourly() {
+    local keep=$((CFG_RETENTION * 24))
+    [ "$keep" -gt 0 ] || return 0
+    awk -F'\t' -v keep="$keep" '
+        { hours[$1] = 1 }
+        END {
+            n = 0
+            for (h in hours) order[n++] = h
+            # insertion sort: the number of distinct hours is small
+            for (i = 1; i < n; i++) {
+                v = order[i]; j = i - 1
+                while (j >= 0 && order[j] > v) { order[j+1] = order[j]; j-- }
+                order[j+1] = v
+            }
+            cutoff = ""
+            if (n > keep) cutoff = order[n - keep]
+            for (h in hours) if (cutoff != "" && h < cutoff) drop[h] = 1
+            for (h in drop) print h
+        }' "$CFG_DATADIR/hourly.tsv" > "$CFG_DATADIR/.drop" 2>/dev/null
+    if [ -s "$CFG_DATADIR/.drop" ]; then
+        awk -F'\t' 'NR == FNR { drop[$1] = 1; next } !($1 in drop)' \
+            "$CFG_DATADIR/.drop" "$CFG_DATADIR/hourly.tsv" > "$CFG_DATADIR/.hourly.new" \
+            && mv -f "$CFG_DATADIR/.hourly.new" "$CFG_DATADIR/hourly.tsv"
+    fi
+    rm -f "$CFG_DATADIR/.drop"
+}
+
+# ---------------------------------------------------------------- snapshot for rpcd
+json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+
+write_summary() {
+    local hour flows dnsmap wd wu
+    hour=$(cat "$STATE_DIR/hour" 2>/dev/null)
+    # wc -l, not "grep -c . || echo 0": an empty file makes grep print 0 *and*
+    # exit non-zero, so the fallback would append a second 0 and the "field":
+    # value would end up spanning two lines, which is not valid JSON.
+    flows=$(wc -l < "$STATE_DIR/flow.state" 2>/dev/null || echo 0)
+    dnsmap=$(wc -l < "$STATE_DIR/dnsmap.tsv" 2>/dev/null || echo 0)
+
+    {
+        printf '{"collected_at":%s,"interval":%s,"hour":"%s","flows":%s,"dnsmap_lines":%s,' \
+            "$(date +%s 2>/dev/null || echo 0)" "$CFG_INTERVAL" "$(json_escape "$hour")" "$flows" "$dnsmap"
+        # Collector metadata, at the top level of the snapshot because that is
+        # where the page reads it from: which build is running, whether the
+        # per-host counters are behind the client totals, how many host names are
+        # still waiting, and which addresses count as the box itself.  These are
+        # not totals and must not be nested inside "totals", or the page would
+        # silently render none of them.
+        printf '"version":"%s"' "$COLLECTOR_VERSION"
+        printf ',"acct":%s' "$ACCT_ON"
+        # Forcing the nft counters on a router that offloads is the one
+        # combination that undercounts silently, so the page is told to say so
+        # rather than leaving the reader to notice that the client traffic is
+        # smaller than what the box itself carried.
+        [ "$ACCT_ON" = "1" ] && [ "$ACCT_OFFLOAD" = "1" ] && printf ',"acct_offload":1'
+        if [ "$ACCT_ON" = "1" ]; then
+            printf ',"accounted":{'
+            awk -F'\t' '{ d += $2; u += $3 } END { printf "\"down\":%.0f,\"up\":%.0f}", d + 0, u + 0 }' \
+                "$STATE_DIR/acct.tsv" 2>/dev/null || printf '"down":0,"up":0}'
+        fi
+        [ -s "$STATE_DIR/acct.off" ] && printf ',"acct_error":"%s"' "$(json_escape "$(sed -n '1p' "$STATE_DIR/acct.off")")"
+        # The total the box actually carried, read from the WAN device's own
+        # counters.  Published beside the attribution instead of folded into it,
+        # because the two answer different questions: this is how much traffic
+        # there was, while "totals" is how much of it the attribution could name.
+        # Offloading does not touch it, which is what makes it the number to trust
+        # on a router whose firewall forwards in the fast path.
+        #
+        # Written only when a WAN device was identified.  The absence of "iface"
+        # is what tells the page to fall back to the attributed numbers rather
+        # than show a total of zero.
+        if [ -n "$WAN_IF" ] && [ -s "$STATE_DIR/wan.tsv" ]; then
+            wd=0; wu=0
+            { read -r wd; read -r wu; } < "$STATE_DIR/wan.tsv"
+            case "$wd" in ''|*[!0-9]*) wd=0 ;; esac
+            case "$wu" in ''|*[!0-9]*) wu=0 ;; esac
+            printf ',"iface":{"dev":"%s","down":%s,"up":%s}' "$(json_escape "$WAN_IF")" "$wd" "$wu"
+        fi
+        # Whether the firewall offloads, always published: the attribution is
+        # partial when it does, and the page has to be able to say so even in the
+        # shipped "auto" accounting mode, where the nft counters never end up
+        # being the layer being reported.
+        printf ',"offload":%s' "$ACCT_OFFLOAD"
+        printf ',"pending":%s' "$(sed -n '1p' "$STATE_DIR/pending" 2>/dev/null || echo 0)"
+        printf ',"rounds":%s' "$(sed -n '1p' "$STATE_DIR/rounds" 2>/dev/null || echo 0)"
+        # which addresses count as the box itself: shown by the page, and the
+        # first thing to look at when a client list seems to have the box in it
+        printf ',"self":"%s"' "$(printf '%s' "$CFG_SELF" | tr ' ' '\n' | grep -v '^$' | head -4 | tr '\n' ' ' | sed -e 's/ *$//' -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+        # Per-application client breakdown, rebuilt with every snapshot: how
+        # many devices used an application, and which one carried most of it.
+        # The output is redirected explicitly so it does not land in the
+        # snapshot being assembled around it.
+        awk -F'\t' '
+            { sum[$1] += $3; cnt[$1] += 1
+              if ($3 > best[$1]) { best[$1] = $3; who[$1] = $2 } }
+            END { for (k in sum) printf "%s\t%.0f\t%.0f\t%s\n", k, cnt[k], best[k], who[k] }
+        ' "$STATE_DIR/ac.tsv" 2>/dev/null > "$STATE_DIR/ac.agg"
+
+        printf ',"querylog":"%s","apps":[' "$(json_escape "$CFG_QUERYLOG")"
+        # The heaviest N applications are picked inside awk instead of by a
+        # "sort | head | awk" pipeline: the table is small but the pipeline cost
+        # three processes on every snapshot, and a snapshot is written on every
+        # poll.  A partial selection sort over N is a few thousand comparisons.
+        awk -F'\t' -v acagg="$STATE_DIR/ac.agg" -v leases="${TRAFFIC_LEASES:-/tmp/dhcp.leases}" \
+            -v top="$CFG_TOP_APPS" '
+          BEGIN {
+              while ((getline l < acagg) > 0) {
+                  split(l, f, "\t")
+                  if (f[1] == "") continue
+                  acn[f[1]] = f[2] + 0; acb[f[1]] = f[3] + 0; act[f[1]] = f[4]
+              }
+              close(acagg)
+              # a DHCP lease turns a bare address into something readable
+              while ((getline l < leases) > 0) {
+                  split(l, f, " ")
+                  if (f[3] != "" && f[4] != "") {
+                      nm = f[4]; gsub(/[^A-Za-z0-9._-]/, "_", nm); lname[f[3]] = nm
+                  }
+              }
+              close(leases)
+              # The names below are not applications at all.  They are the last
+              # resort of the attribution - what the protocol and port alone said
+              # about a flow whose destination never got a name - and together they
+              # carried about a third of the attributed traffic.  Listed among the
+              # applications they read as if an app called "SSL/TLS" had been used,
+              # so the page is told which of these rows are protocol buckets.
+              npb = split("SSL/TLS QUIC HTTP DNS STUN RTSP Email ICMP Other", pbl, " ")
+              for (pi = 1; pi <= npb; pi++) proto[pbl[pi]] = 1
+              n = 0
+          }
+          {
+              t = $2 + $3
+              if (t <= 0) next
+              n++; key[n] = $1; val[n] = t; upv[n] = $2; dnv[n] = $3
+          }
+          END {
+              k = (n < top) ? n : top
+              for (i = 1; i <= k; i++) {
+                  m = i
+                  for (j = i + 1; j <= n; j++) if (val[j] > val[m]) m = j
+                  if (m != i) {
+                      tv = val[i]; val[i] = val[m]; val[m] = tv
+                      tk = key[i]; key[i] = key[m]; key[m] = tk
+                      tu = upv[i]; upv[i] = upv[m]; upv[m] = tu
+                      td = dnv[i]; dnv[i] = dnv[m]; dnv[m] = td
+                  }
+                  who = act[key[i]]; wb = acb[key[i]]
+                  disp = (who in lname) ? lname[who] : who
+                  if (i > 1) printf ","
+                  printf "{\"name\":\"%s\",\"down\":%.0f,\"up\":%.0f,\"clients\":%.0f,\"top\":\"%s\",\"top_bytes\":%.0f%s}",
+                         key[i], dnv[i], upv[i], acn[key[i]], disp, wb, (key[i] in proto) ? ",\"proto\":1" : ""
+              }
+          }' "$STATE_DIR/totals.tsv" 2>/dev/null
+        printf '],"clients":['
+        # same trick for the busiest clients
+        awk -F'\t' -v leases="${TRAFFIC_LEASES:-/tmp/dhcp.leases}" -v top="$CFG_TOP_CLIENTS" '
+          BEGIN {
+              while ((getline l < leases) > 0) {
+                  split(l, f, " ")
+                  if (f[3] != "" && f[4] != "") {
+                      nm = f[4]; gsub(/[^A-Za-z0-9._-]/, "_", nm); lname[f[3]] = nm
+                  }
+              }
+              close(leases)
+              n = 0
+          }
+          {
+              b = $2 + 0
+              if (b <= 0) next
+              n++; cip[n] = $1; cby[n] = b
+          }
+          END {
+              k = (n < top) ? n : top
+              for (i = 1; i <= k; i++) {
+                  m = i
+                  for (j = i + 1; j <= n; j++) if (cby[j] > cby[m]) m = j
+                  if (m != i) { tb = cby[i]; cby[i] = cby[m]; cby[m] = tb
+                                ti = cip[i]; cip[i] = cip[m]; cip[m] = ti }
+                  disp = (cip[i] in lname) ? lname[cip[i]] : cip[i]
+                  if (i > 1) printf ","
+                  printf "{\"ip\":\"%s\",\"name\":\"%s\",\"bytes\":%.0f}", cip[i], disp, cby[i]
+              }
+          }' "$STATE_DIR/clients.tsv" 2>/dev/null
+        printf '],"totals":{'
+        awk -F'\t' -v clients="$STATE_DIR/clients.tsv" '
+            BEGIN {
+                while ((getline l < clients) > 0) {
+                    split(l, f, "\t"); client_bytes += f[2] + 0
+                }
+                close(clients)
+            }
+            {
+            up += $2; down += $3
+            if ($1 == "Other") ou += $2 + $3
+        } END {
+            printf "\"down\":%.0f,\"up\":%.0f,\"other\":%.0f,\"client_bytes\":%.0f", down, up, ou, client_bytes
+        }' "$STATE_DIR/totals.tsv" 2>/dev/null
+        printf ',"router":%s' "$(cat "$STATE_DIR/router.tsv" 2>/dev/null || echo 0)"
+        printf ',"client_count":%s' "$(wc -l < "$STATE_DIR/clients.tsv" 2>/dev/null || echo 0)"
+        # stat.tsv: <named via same client> <named via any client> <bucket> <other>
+        awk -F'\t' '{ printf ",\"exact\":%.0f,\"any\":%.0f,\"bucket\":%.0f,\"residual\":%.0f", $1, $2, $3, $4 }' \
+            "$STATE_DIR/stat.tsv" 2>/dev/null
+        printf '}}\n'
+    } > "$STATE_DIR/summary.json.new" 2>/dev/null \
+        && mv -f "$STATE_DIR/summary.json.new" "$STATE_DIR/summary.json"
+}
+
+# ---------------------------------------------------------------- main
+run() {
+    load_config
+    [ "$CFG_ENABLED" = "1" ] || { log "disabled by uci"; return 0; }
+    init_state
+    auto_purge
+    log "started: interval=${CFG_INTERVAL}s lan4=$CFG_LAN4 lan6=$CFG_LAN6 querylog=$CFG_QUERYLOG"
+
+    # Publish a snapshot before doing any real work, so that the page reflects
+    # the collector starting rather than staying empty until the first round
+    # finishes.  This also makes "no snapshot at all" mean exactly one thing:
+    # the service is not running.  Without it, a collector that starts and then
+    # stalls in its first round looks identical to one that never started, which
+    # is the state that is hardest to tell apart from the outside.
+    account_clients
+    # The interface counters are read before anything publishes a snapshot, so
+    # that even the very first one carries the total the box really carried
+    # rather than an empty one the page would have to explain.
+    iface_account
+    publish_live_env
+    publish_current
+    write_summary
+
+    local hour last_hour now
+    last_hour=$(cat "$STATE_DIR/hour" 2>/dev/null)
+    while :; do
+        poll_dns
+        poll_dnsmasq
+        resolve_names
+        poll_ct
+        # the counters are read before classify(): they are what the client
+        # totals come from, and reading them first keeps a rule rebuild from
+        # swallowing the round
+        account_clients
+        # The authoritative total is read in the same round as the attribution it
+        # is published beside, so that the share the page shows describes one
+        # window rather than two.
+        iface_account
+        classify
+        # what the one-second sampler needs: the same counters this round read,
+        # and the same decision about which layer is authoritative
+        publish_live_env
+        collect_npu
+        # one clock read per round, shared by the sample and the hour check
+        now=$(date +%s 2>/dev/null || echo 0)
+        record_sample "$now"
+        hour=$(date +%Y-%m-%dT%H 2>/dev/null)
+        if [ -n "$last_hour" ] && [ "$hour" != "$last_hour" ]; then
+            roll_hour
+        fi
+        [ -n "$hour" ] && last_hour=$hour
+        ROUNDS=$(( ${ROUNDS:-0} + 1 ))
+        printf '%s\n' "$ROUNDS" > "$STATE_DIR/rounds"
+        publish_current
+        write_summary
+        # Website fetching is independent of accounting and requires no settings.
+        # One asynchronous pass per minute; the runner locks and times out itself.
+        if [ "$((now - ${SITE_ICONS_AT:-0}))" -ge 60 ]; then
+            SITE_ICONS_AT=$now
+            /bin/sh /usr/share/traffic/website-icons.sh >/dev/null 2>&1 &
+        fi
+        # The page's realtime meter samples once a second, which is finer than a
+        # round.  This is a tick loop rather than one `sleep $CFG_INTERVAL` so the
+        # sampler can run between rounds.  live.sh exits after two stat() calls
+        # unless the page is open (rpcd writes the timestamp when it polls), so a
+        # router nobody is watching pays nothing for this.
+        #
+        # The deadline is taken from the START of the round, not from the end of
+        # the previous tick.  Sleeping a fixed second AFTER the sampler made every
+        # tick 1s + whatever the sampler cost: at about a second per sample the
+        # meter moved only every two seconds, and the round - which is supposed to
+        # be CFG_INTERVAL seconds - silently took twice as long, so the history
+        # and the rates were built on an interval nobody had configured.
+        tick=0
+        round_at=$(date +%s 2>/dev/null)
+        case "$round_at" in ''|*[!0-9]*) round_at= ;; esac
+        PEAK_D=0; PEAK_U=0; PEAK_N=0
+        while [ "$tick" -lt "$CFG_INTERVAL" ]; do
+            # realtime.sh is an independent procd instance; this loop reads
+            # its cached result for the existing coarse history peak only.
+            # The one-second sample is the only reading fine enough to see a
+            # burst.  A gigabit speed test lasting a second is a tenth of a
+            # round, so a round average can only ever show a tenth of it - which
+            # is how a 991 Mbps test was published as a peak of 12.9 MiB/s.  Keep
+            # the maximum of this round and its sample count here; record_peak
+            # folds them into the minute bucket the chart reads.
+            peak_read
+            tick=$((tick + 1))
+            wait_s=1
+            if [ -n "$round_at" ]; then
+                now_at=$(date +%s 2>/dev/null)
+                case "$now_at" in ''|*[!0-9]*) now_at= ;; esac
+                if [ -n "$now_at" ]; then
+                    wait_s=$((round_at + tick - now_at))
+                    [ "$wait_s" -lt 0 ] && wait_s=0
+                fi
+            fi
+            [ "$wait_s" -gt 0 ] && sleep "$wait_s"
+        done
+        # the maximum of this round, folded into its minute bucket
+        record_peak
+    done
+}
+
+run
