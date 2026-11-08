@@ -136,6 +136,7 @@ endef
 
 TARGET_CFLAGS := $(filter-out -O%,$(TARGET_CFLAGS)) \
 	-Wno-unterminated-string-initialization \
+	-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
 	$(if $(findstring cortex-a53,$(CONFIG_CPU_TYPE)),-march=armv8-a)
 
 CMAKE_OPTIONS += \

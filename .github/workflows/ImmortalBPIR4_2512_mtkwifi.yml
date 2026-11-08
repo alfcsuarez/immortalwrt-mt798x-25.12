@@ -48,9 +48,6 @@ jobs:
           if [ -f feeds/luci/collections/luci-ssl-openssl/Makefile ] && grep -qF '+px5g-openssl' feeds/luci/collections/luci-ssl-openssl/Makefile && [ ! -d package/utils/px5g-openssl ]; then
             sed -i 's/+px5g-openssl/+px5g-standalone/' feeds/luci/collections/luci-ssl-openssl/Makefile
           fi
-          if ! grep -q '_FORTIFY_SOURCE=0' package/libs/mbedtls/Makefile 2>/dev/null; then
-            echo 'TARGET_CFLAGS += -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0' >> package/libs/mbedtls/Makefile
-          fi
 
       - name: Load BPI R4 custom config
         run: |
