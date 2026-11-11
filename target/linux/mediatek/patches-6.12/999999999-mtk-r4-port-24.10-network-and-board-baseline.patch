@@ -25423,7 +25423,7 @@ Preserve the 6.12 core; adapt MTK board, network and tunnel interfaces.
 +		/* A failed/partial resolution cannot supply a device or hardware
 +		 * action for publication. Leave this packet on its software path.
 +		 */
-+		if (path_err || !hw_path.dev || !hw_path.virt_dev) {
++		if ((path_err && (path_err != -EINVAL || (hw_path.flags & BIT(DEV_PATH_ETHERNET)))) || !hw_path.dev || !hw_path.virt_dev) {
 +#if defined(CONFIG_MEDIATEK_NETSYS_V3)
 +			if (tunnel_outer) {
 +				hnat_tunnel_event(TNL_OUTER_PATH_REJECT);
