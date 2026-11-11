@@ -891,7 +891,25 @@ function mtwifi_cfg_setup(argv)
         dats.TxPower = 100
     end
 
-    if cfg.config.mu_beamformer then
+    local is_disabled = function(val)
+        return val == false or val == 0 or val == "0" or val == "false" or val == "no"
+    end
+    local is_truthy = function(val)
+        return val == true or val == 1 or val == "1" or val == "true" or val == "yes"
+    end
+
+    local bf_enabled
+    if is_truthy(cfg.config.mu_beamformer) then
+        bf_enabled = true
+    elseif cfg.config.bf_type ~= nil and cfg.config.bf_type ~= "" and tonumber(cfg.config.bf_type) and tonumber(cfg.config.bf_type) > 0 then
+        bf_enabled = true
+    elseif is_disabled(cfg.config.mu_beamformer) or is_disabled(cfg.config.bf_type) then
+        bf_enabled = false
+    else
+        bf_enabled = true
+    end
+
+    if bf_enabled then
         dats.ETxBfEnCond = 1
         if dats.ApCliEnable == 1 then
             dats.MUTxRxEnable = 3
