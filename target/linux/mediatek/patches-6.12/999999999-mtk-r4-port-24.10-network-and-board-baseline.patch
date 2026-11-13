@@ -24837,7 +24837,7 @@ Preserve the 6.12 core; adapt MTK board, network and tunnel interfaces.
  	foe = &hnat_priv->foe_table_cpu[headroom_ppe(headroom[hash])][hash];
  
  	mtk_464xlat_fill_info1(&entry, skb, l2w);
-@@ -4576,104 +3980,593 @@
+@@ -4576,104 +3980,609 @@
  
  	/* We must ensure all info has been updated before set to hw */
  	wmb();
@@ -25418,6 +25418,21 @@ Preserve the 6.12 core; adapt MTK board, network and tunnel interfaces.
 +		}
 +	}
 +#endif
++	if (netif_is_bridge_master(route_out) && !(hw_path.flags & BIT(DEV_PATH_ETHERNET))) {
++		if (br_vlan_enabled(route_out)) {
++			if (skb_vlan_tag_present(skb))
++				hw_path.vlan_id = skb_vlan_tag_get_id(skb);
++		}
++
++		if (fn && fn(skb, arp_dev, &hw_path)) {
++			hnat_diag_note(skb, HNAT_DIAG_NO_ROUTE, 0, 0, -1, 0, -1);
++			return 0;
++		}
++		ether_addr_copy(hw_path.eth_dest, eth_hdr(skb)->h_dest);
++		ether_addr_copy(hw_path.eth_src, eth_hdr(skb)->h_source);
++		hw_path.flags |= BIT(DEV_PATH_ETHERNET);
++	}
++
 +	if (out->netdev_ops->ndo_flow_offload_check) {
 +		path_err = out->netdev_ops->ndo_flow_offload_check(&hw_path);
 +		/* A failed/partial resolution cannot supply a device or hardware
