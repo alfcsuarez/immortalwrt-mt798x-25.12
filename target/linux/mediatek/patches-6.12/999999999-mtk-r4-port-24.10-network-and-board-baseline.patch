@@ -24837,7 +24837,7 @@ Preserve the 6.12 core; adapt MTK board, network and tunnel interfaces.
  	foe = &hnat_priv->foe_table_cpu[headroom_ppe(headroom[hash])][hash];
  
  	mtk_464xlat_fill_info1(&entry, skb, l2w);
-@@ -4576,104 +3980,609 @@
+@@ -4576,104 +3980,608 @@
  
  	/* We must ensure all info has been updated before set to hw */
  	wmb();
