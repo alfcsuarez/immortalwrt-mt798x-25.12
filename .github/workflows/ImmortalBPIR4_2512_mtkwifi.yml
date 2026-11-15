@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   build:
@@ -17,7 +18,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          fetch-depth: 0
+          filter: blob:none
 
       - name: Free disk space
         run: |
@@ -33,6 +35,27 @@ jobs:
             gettext libncurses-dev libssl-dev python3-setuptools \
             rsync swig unzip zlib1g-dev file wget libelf-dev ccache git jq
 
+      - name: Generate cache keys
+        id: cache-key
+        run: |
+          echo "ccache_period=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      - name: Restore toolchain cache
+        uses: klever1988/cachewrtbuild@54ed4fe2f7d8b5cfbc0b928c159266ee892c2d3d
+        with:
+          ccache: 'false'
+          prefix: ${{ github.workspace }}
+          mixkey: immortalwrt-BPI-R4-25.12-main
+
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ccache-immortalwrt-BPI-R4-25.12-main-${{ steps.cache-key.outputs.ccache_period }}
+          restore-keys: |
+            ccache-immortalwrt-BPI-R4-25.12-main-
+
       - name: Update and install feeds
         run: |
           ./scripts/feeds update -a
@@ -41,13 +64,62 @@ jobs:
             sed -i 's/ +weechat / +weechat-minimal /' feeds/luci/applications/luci-app-weechat/Makefile
             ./scripts/feeds update -i luci
           fi
+          for pkg in luci-app-fan luci-app-sfp-status luci-app-modemband luci-app-turboacc-mtk luci-app-traffic rpcd-mod-router-status luci-app-hqos-mtk; do
+            rm -rf "feeds/luci/applications/$pkg" "package/feeds/luci/$pkg"
+          done
           ./scripts/feeds install -a
-          for pkg in luci-app-fan luci-app-sfp-status luci-app-modemband luci-app-turboacc-mtk luci-app-traffic rpcd-mod-router-status; do
+          for pkg in luci-app-fan luci-app-sfp-status luci-app-modemband luci-app-turboacc-mtk luci-app-traffic rpcd-mod-router-status luci-app-hqos-mtk; do
             rm -rf "feeds/luci/applications/$pkg" "package/feeds/luci/$pkg"
           done
           if [ -f feeds/luci/collections/luci-ssl-openssl/Makefile ] && grep -qF '+px5g-openssl' feeds/luci/collections/luci-ssl-openssl/Makefile && [ ! -d package/utils/px5g-openssl ]; then
             sed -i 's/+px5g-openssl/+px5g-standalone/' feeds/luci/collections/luci-ssl-openssl/Makefile
           fi
+
+          # Defensive feed fixes from diy-mtk.sh
+          # Go >= 1.27 check
+          _go_values="feeds/packages/lang/golang/golang-values.mk"
+          if [ -f "$_go_values" ]; then
+            _go_feed_default="$(sed -n 's/^GO_DEFAULT_VERSION:=[[:space:]]*//p' "$_go_values" 2>/dev/null)"
+            _go_default="$_go_feed_default"
+            case "$_go_default" in
+              1.[0-9]|1.1[0-9]|1.2[0-6]) _go_default=1.27 ;;
+            esac
+            if [ -n "$_go_default" ] && [ "$_go_default" != "$_go_feed_default" ]; then
+              if grep -qxF "PKG_NAME:=golang$_go_default" "feeds/packages/lang/golang/golang$_go_default/Makefile" 2>/dev/null; then
+                sed -i "s/^GO_DEFAULT_VERSION:=.*/GO_DEFAULT_VERSION:=$_go_default/" "$_go_values"
+              fi
+            fi
+          fi
+
+          # containerd -checklinkname=0 injection
+          _containerd_make="feeds/packages/utils/containerd/Makefile"
+          if [ -f "$_containerd_make" ] && ! grep -q 'checklinkname=0' "$_containerd_make"; then
+            awk -v ins="MAKE_FLAGS += EXTRA_LDFLAGS='-s -w -checklinkname=0'" '{print} /^Build\/Compile=/ {print ins}' "$_containerd_make" > "$_containerd_make.tmp" && mv "$_containerd_make.tmp" "$_containerd_make"
+          fi
+
+          # Rust llvm.download-ci-llvm=false
+          _rust_makefile="feeds/packages/lang/rust/Makefile"
+          if [ -f "$_rust_makefile" ]; then
+            if grep -qF -- '--set=llvm.download-ci-llvm=true' "$_rust_makefile"; then
+              sed -i 's/--set=llvm\.download-ci-llvm=true/--set=llvm.download-ci-llvm=false/' "$_rust_makefile"
+            fi
+          fi
+
+          # python-ubus (python3/host) and zabbix (libnetsnmp) dependency fixes
+          for f in feeds/packages/lang/python/python-ubus/Makefile package/feeds/packages/python-ubus/Makefile; do
+            [ -f "$f" ] && sed -i 's/PKG_BUILD_DEPENDS:=python-setuptools\/host/PKG_BUILD_DEPENDS:=python3\/host/' "$f" || true
+          done
+          for f in feeds/packages/admin/zabbix/Makefile package/feeds/packages/zabbix/Makefile; do
+            [ -f "$f" ] && sed -i 's/libnetsnmp-ssl/libnetsnmp/g' "$f" || true
+          done
+
+          # Remove kiddin9 broken APK repo lines if present
+          for f in \
+              package/base-files/files/etc/apk/repositories \
+              package/base-files/files/etc/apk/repositories.d/* \
+              package/utils/alpine-repositories/files/repositories; do
+            [ -f "$f" ] && grep -q 'kiddin9' "$f" 2>/dev/null && sed -i '/kiddin9/d' "$f" 2>/dev/null || true
+          done
 
       - name: Load BPI R4 custom config
         run: |
@@ -70,20 +142,127 @@ jobs:
           printf '# CONFIG_EN_HWIFI_NPU_SUPPORT is not set\n' >> .config
           sed -i '/^CONFIG_KERNEL_NET_MEDIATEK_HNAT=/d; /^CONFIG_KERNEL_MEDIATEK_NETSYS_/d; /^# CONFIG_KERNEL_MEDIATEK_NETSYS_.* is not set$/d' .config
           make defconfig
+          grep -qx 'CONFIG_PACKAGE_rpcd-mod-router-status=y' .config
+          grep -qx 'CONFIG_PACKAGE_luci-app-hqos-mtk=y' .config
 
       - name: Download dependencies
         run: |
-          make download -j8
+          make download -j$(nproc)
           find dl -size -1024c -exec ls -l {} \;
           find dl -size -1024c -exec rm -f {} \;
         timeout-minutes: 120
 
       - name: Compile firmware
+        id: compile
         run: |
-          make -j$(nproc) || make -j1 V=s
+          make -j$(nproc) || make -j$(($(nproc)/2 + 1)) || make -j1 V=s
+          staging_dir/host/bin/ccache --show-stats || true
+          du -sh .ccache || true
+          echo "status=success" >> $GITHUB_OUTPUT
         timeout-minutes: 480
         env:
-          CONFIG_CCACHE_DIR: ~/.ccache
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+      - name: Save ccache
+        if: steps.compile.outputs.status == 'success' && steps.ccache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
+
+      - name: Prune old caches
+        if: steps.compile.outputs.status == 'success' && !cancelled()
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          CACHE_SCOPE: immortalwrt-BPI-R4-25.12-main
+          CCACHE_PREFIX: ccache-immortalwrt-BPI-R4-25.12-main-
+          TOOLCHAIN_PREFIX: immortalwrt-BPI-R4-25.12-main-cache-openwrt-
+          CURRENT_CCACHE_KEY: ${{ steps.ccache-restore.outputs.cache-primary-key }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const scope = process.env.CACHE_SCOPE;
+            const ccachePrefix = process.env.CCACHE_PREFIX;
+            const toolchainPrefix = process.env.TOOLCHAIN_PREFIX;
+            const currentCcacheKey = process.env.CURRENT_CCACHE_KEY;
+
+            const caches = [];
+            for (let page = 1; ; page += 1) {
+              const response = await github.request('GET /repos/{owner}/{repo}/actions/caches', {
+                owner,
+                repo,
+                per_page: 100,
+                page,
+              });
+
+              const pageCaches = response.data.actions_caches || [];
+              caches.push(...pageCaches);
+              if (pageCaches.length < 100) {
+                break;
+              }
+            }
+
+            const byNewest = (left, right) => {
+              const leftTime = new Date(left.last_accessed_at || left.created_at || 0).getTime();
+              const rightTime = new Date(right.last_accessed_at || right.created_at || 0).getTime();
+              return rightTime - leftTime;
+            };
+
+            const ccacheCaches = caches
+              .filter((cache) => (cache.key || '').startsWith(ccachePrefix))
+              .sort(byNewest);
+            const staleCcacheCaches = ccacheCaches.filter((cache) => cache.key !== currentCcacheKey);
+
+            const toolchainCaches = caches
+              .filter((cache) => {
+                const key = cache.key || '';
+                return key.startsWith(toolchainPrefix);
+              })
+              .sort(byNewest);
+            const staleToolchainCaches = toolchainCaches.slice(1);
+
+            const staleCaches = [...staleCcacheCaches, ...staleToolchainCaches];
+            if (staleCaches.length === 0) {
+              core.info(
+                `No stale caches to delete for prefixes: ${ccachePrefix} , ${toolchainPrefix}`
+              );
+              return;
+            }
+
+            const deletedPrefixes = [...new Set(
+              staleCaches.map((cache) => {
+                const key = cache.key || '';
+                if (key.startsWith(ccachePrefix)) {
+                  return ccachePrefix;
+                }
+                if (key.startsWith(toolchainPrefix)) {
+                  return toolchainPrefix;
+                }
+                return `unmatched:${scope}`;
+              })
+            )];
+
+            core.info(`Deleting stale caches for key prefixes: ${deletedPrefixes.join(', ')}`);
+
+            for (const cache of staleCaches) {
+              const prefix = (cache.key || '').startsWith(ccachePrefix) ? ccachePrefix : toolchainPrefix;
+              core.info(`Deleting cache with prefix ${prefix}: ${cache.key} (${cache.id})`);
+              await github.request('DELETE /repos/{owner}/{repo}/actions/caches/{cache_id}', {
+                owner,
+                repo,
+                cache_id: cache.id,
+              });
+            }
+
+            core.info(
+              `Deleted ${staleCaches.length} stale cache(s). ` +
+              `Kept ccache key: ${currentCcacheKey || 'none'}. ` +
+              `Kept toolchain cache count: ${toolchainCaches.length > 0 ? 1 : 0}. ` +
+              `Tracked prefixes: ${ccachePrefix}, ${toolchainPrefix}.`
+            );
 
       - name: Prepare firmware artifacts
         if: success()
