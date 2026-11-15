@@ -1,5 +1,7 @@
 #!/bin/sh
 
+[ "$ACTION" = "ifup" ] || exit 0
+
 NPROCS="$(grep -c "^processor.*:" /proc/cpuinfo)"
 [ "$NPROCS" -gt 1 ] || exit
 

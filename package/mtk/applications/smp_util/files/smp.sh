@@ -91,9 +91,9 @@ MT7990_whnat()
 		CPU3_AFFINITY="$eth_tx $eth_rx3 $usb_irq"
 
 		CPU0_RPS=""
-		CPU1_RPS="$ethif1 $ethif2 $wifi3 $wifi3_apcli0 $ethif3"
-		CPU2_RPS="$ethif1 $ethif2 $wifi1 $wifi2 $wifi1_apcli0 $wifi2_apcli0 $ethif3"
-		CPU3_RPS="$ethif1 $ethif2 $wifi1 $wifi2 $wifi3 $wifi1_apcli0 $wifi2_apcli0 $wifi3_apcli0 $ethif3"
+		CPU1_RPS="$ethif1 $ethif2 $wifi3 $wifi3_apcli0 $ethif3 rax1"
+		CPU2_RPS="$ethif1 $ethif2 $wifi1 $wifi2 $wifi1_apcli0 $wifi2_apcli0 $ethif3 rai1"
+		CPU3_RPS="$ethif1 $ethif2 $wifi1 $wifi2 $wifi3 $wifi1_apcli0 $wifi2_apcli0 $wifi3_apcli0 $ethif3 rax1 rai1"
 	else
 		dbg "MT7990_whnat with $NUM_OF_WIFI Wi-Fi bands is not support"
 	fi
@@ -674,9 +674,9 @@ get_wifi_if_name()
 		#wifi_if1s=`l1dat idx2if 1`
 		#wifi_if2s=`l1dat idx2if 2`
 		#wifi_if3s=`l1dat idx2if 3`
-		board=$(board_name)
+		board=$(cat /tmp/sysinfo/board_name 2>/dev/null || board_name)
 		case $board in
-		*7988*)
+		*7988*|*bpi-r4*)
 			wifi_if1s=`l1dat zone2if dev00`
 			wifi_if2s=`l1dat zone2if dev01`
 			wifi_if3s=`l1dat zone2if dev02`
@@ -720,7 +720,7 @@ get_wifi_if_name()
 	dbg2 "\$wifi2=$wifi2"
 	dbg2 "\$wifi3=$wifi3"
 
-	RPS_IF_LIST="$RPS_IF_LIST $wifi1 $wifi2 $wifi3"
+	RPS_IF_LIST="$RPS_IF_LIST $wifi1 $wifi2 $wifi3 rax1 rai1"
 
 	gen_vifs_to_rps_if "wifi1_apcli" 1
 	gen_vifs_to_rps_if "wifi2_apcli" 1
@@ -790,12 +790,12 @@ module_exist()
 
 setup_model()
 {
-	board=$(board_name)
+	board=$(cat /tmp/sysinfo/board_name 2>/dev/null || board_name)
 	num_of_wifi=$(get_wifi_num)
 	mt_whnat_en=$(module_exist "mt_whnat")
 
 	case $board in
-	*7988*)
+	*7988*|*bpi-r4*)
 		MT7990_whnat $num_of_wifi
 		;;
 	*7986*)
@@ -860,7 +860,7 @@ set_rps_cpu_bitmap()
 		eval rps_list=\$CPU${num}_RPS
 		dbg2 "# CPU$num: rps_list=$rps_list"
 		for i in $rps_list; do
-			var=${VAR_PREFIX}_${i//-/_}
+			var=${VAR_PREFIX}_$(echo "$i" | tr ".-" "__")
 			eval ifval=\$$var
 			dbg2 "[var val before] \$$var=$ifval"
 			if [ -z "$ifval" ]; then
@@ -880,7 +880,7 @@ set_rps_cpus()
 {
 	dbg2 "# Setup rps of the interfaces, $RPS_IF_LIST."
 	for i in $RPS_IF_LIST; do
-		var=${VAR_PREFIX}_${i//-/_}
+		var=${VAR_PREFIX}_$(echo "$i" | tr ".-" "__")
 		eval cpu_map=\$$var
 		if [ -d /sys/class/net/$i ]; then
 			if [ ! -z $cpu_map ]; then
