@@ -1,14 +1,29 @@
 From: MedyMa <75345465+MedyMa@users.noreply.github.com>
-Subject: [PATCH] iwinfo: iterate valid MLO links and preserve station identity
+Subject: [PATCH] iwinfo: iterate valid MLO slots and preserve station identity
 
 Inspect all three vendor link slots before deriving the link count. Keep
-sparse slot IDs in every consumer, and do not invent per-link PHY data
+sparse slot indices in every consumer, and do not invent per-link PHY data
 from aggregate rates on a multi-link connection. Bound Mbps conversion.
-Keep the Lua station key independent of the MLD address.
+Match the queried station and setup MAC; slot indices are not protocol Link
+IDs. Keep the Lua station key independent of the MLD address.
 
 --- a/iwinfo_nl80211.c
 +++ b/iwinfo_nl80211.c
-@@ -2287,10 +2287,8 @@
+@@ -2266,10 +2266,11 @@
+                                  struct iwinfo_assoclist_entry *e)
+ {
+ 	struct mtk_station_information si;
+-	int i, j, first = -1, best_snr = 0;
++	int i, j, setup = -1, best_snr = 0;
+ 
+ 	memset(&si, 0, sizeof(si));
+-	if (nl80211_get_mtk_sta_info(ifname, e->mac, &si))
++	if (nl80211_get_mtk_sta_info(ifname, e->mac, &si) ||
++	    memcmp(si.mac, e->mac, sizeof(e->mac)))
+ 		return;
+ 
+ 	/* EHT DCM */
+@@ -2287,21 +2288,21 @@
  	}
  
  	if (si.mlo_enable) {
@@ -21,8 +36,12 @@ Keep the Lua station key independent of the MLD address.
  			struct iwinfo_rate_entry *rx = &e->mlo_rx_rate[j];
  			struct iwinfo_rate_entry *tx = &e->mlo_tx_rate[j];
  
-@@ -2300,8 +2298,10 @@
- 				first = j;
+ 			if (!si.mlo_link[j].valid)
+ 				continue;
+-			if (first < 0)
+-				first = j;
++			if (!memcmp(si.mlo_link[j].link_address, e->mac, sizeof(e->mac)))
++				setup = j;
  
  			/* MTK is Mbps, iwinfo use kbps */
 -			rx->rate = (uint32_t)(si.mlo_link[j].rx_rate * 1000);
@@ -34,7 +53,7 @@ Keep the Lua station key independent of the MLD address.
  
  			/* MLO => EHT */
  			rx->is_eht = 1;
-@@ -2310,32 +2310,31 @@
+@@ -2310,32 +2311,32 @@
  			rx->eht_dcm = si.rx_dcm;
  			tx->eht_dcm = si.tx_dcm;
  
@@ -64,19 +83,20 @@ Keep the Lua station key independent of the MLD address.
  		}
  
 -		e->mlo_link_id = (first >= 0) ? (uint8_t)first : 0;
-+		if (first < 0)
++		if (!e->mlo_num_links)
 +			return;
 +
 +		e->mlo_enable = 1;
 +		memcpy(e->mld_mac, si.mld_mac, 6);
-+		e->mlo_link_id = first;
++		/* This ABI provides array slots, not IEEE 802.11 Link IDs. */
++		e->mlo_link_id = setup >= 0 ? setup : UINT8_MAX;
 +
 +		/* The vendor ABI has no per-link MCS, NSS, bandwidth or GI.
 +		 * Aggregate rate metadata describes a link only when it is alone.
 +		 */
-+		if (e->mlo_num_links == 1) {
-+			struct iwinfo_rate_entry *rx = &e->mlo_rx_rate[first];
-+			struct iwinfo_rate_entry *tx = &e->mlo_tx_rate[first];
++		if (e->mlo_num_links == 1 && setup >= 0) {
++			struct iwinfo_rate_entry *rx = &e->mlo_rx_rate[setup];
++			struct iwinfo_rate_entry *tx = &e->mlo_tx_rate[setup];
 +			uint32_t rx_rate = rx->rate, tx_rate = tx->rate;
 +
 +			if (e->rx_rate.is_eht)
@@ -91,11 +111,31 @@ Keep the Lua station key independent of the MLD address.
  
 --- a/iwinfo_cli.c
 +++ b/iwinfo_cli.c
-@@ -875,8 +875,11 @@
- 			       e->mlo_num_links,
- 			       e->mlo_link_id);
+@@ -327,7 +327,7 @@
+ 			p += snprintf(p, l, ", HE-DCM %d", r->he_dcm);
+ 			l = sizeof(buf) - (p - buf);
+ 		}
+-		else if (r->is_eht)
++		else if (r->is_eht && r->nss)
+ 		{
+ 			p += snprintf(p, l, ", EHT-MCS %d, %dMHz", r->mcs, r->mhz_hi * 256 + r->mhz);
+ 			l = sizeof(buf) - (p - buf);
+@@ -870,13 +870,18 @@
+ 			         e->mld_mac[0], e->mld_mac[1], e->mld_mac[2],
+ 			         e->mld_mac[3], e->mld_mac[4], e->mld_mac[5]);
  
+-			printf("	MLO: yes  MLD: %s  links: %d  setup link: %d\n",
++			printf("	MLO: yes  MLD: %s  links: %d",
+ 			       mld_mac,
+-			       e->mlo_num_links,
+-			       e->mlo_link_id);
+-
 -			for (j = 0; j < e->mlo_num_links && j < 3; j++)
++			       e->mlo_num_links);
++			if (e->mlo_link_id < 3)
++				printf("  setup slot: %u", e->mlo_link_id);
++			printf("\n");
++
 +			for (j = 0; j < 3; j++)
  			{
 +				if (!e->mlo_rx_rate[j].is_eht && !e->mlo_tx_rate[j].is_eht)
@@ -106,7 +146,16 @@ Keep the Lua station key independent of the MLD address.
  				printf("	  link[%d] TX: %-38s\n", j,
 --- a/iwinfo_lua.c
 +++ b/iwinfo_lua.c
-@@ -391,13 +391,15 @@
+@@ -311,7 +311,7 @@
+ 		lua_pushboolean(L, r->is_short_gi);
+ 		lua_setfield(L, -2, rx ? "rx_short_gi" : "tx_short_gi");
+ 	}
+-	else if (r->is_vht || r->is_he | r->is_eht)
++	else if (r->is_vht || r->is_he || (r->is_eht && r->nss))
+ 	{
+ 		lua_pushnumber(L, r->mcs);
+ 		lua_setfield(L, -2, rx ? "rx_mcs" : "tx_mcs");
+@@ -391,25 +391,32 @@
  			set_rateinfo(L, &e->tx_rate, false);
  
  			if (e->mlo_enable) {
@@ -123,8 +172,15 @@ Keep the Lua station key independent of the MLD address.
 +				lua_pushstring(L, mld_mac);
  				lua_setfield(L, -2, "mld_mac");
  
- 				lua_pushinteger(L, e->mlo_link_id);
-@@ -408,8 +410,11 @@
+-				lua_pushinteger(L, e->mlo_link_id);
+-				lua_setfield(L, -2, "mlo_link_id");
++				if (e->mlo_link_id < 3) {
++					lua_pushinteger(L, e->mlo_link_id);
++					lua_setfield(L, -2, "mlo_link_index");
++				}
+ 
+ 				lua_pushinteger(L, e->mlo_num_links);
+ 				lua_setfield(L, -2, "mlo_num_links");
  
  				lua_newtable(L);
  				{
@@ -138,12 +194,28 @@ Keep the Lua station key independent of the MLD address.
  						lua_newtable(L);
  
  						lua_newtable(L);
-@@ -422,7 +427,7 @@
- 						lua_pushinteger(L, j);
- 						lua_setfield(L, -2, "link_id");
+@@ -420,9 +427,9 @@
+ 						lua_setfield(L, -2, "tx_rate");
  
+ 						lua_pushinteger(L, j);
+-						lua_setfield(L, -2, "link_id");
+-
 -						lua_rawseti(L, -2, j + 1);
++						lua_setfield(L, -2, "link_index");
++
 +						lua_rawseti(L, -2, ++n);
  					}
  				}
  				lua_setfield(L, -2, "mlo_links");
+--- a/include/iwinfo.h
++++ b/include/iwinfo.h
+@@ -285,6 +285,9 @@
+ 	struct iwinfo_rate_entry mlo_tx_rate[3];
+ 	uint8_t mlo_enable;
+ 	uint8_t	mld_mac[6];
++	/* Vendor array slot containing the setup MAC; UINT8_MAX if unknown.
++	 * Retain the member name for source/ABI compatibility, not a Link ID.
++	 */
+ 	uint8_t	mlo_link_id;
+ 	uint8_t	mlo_num_links;
+ };

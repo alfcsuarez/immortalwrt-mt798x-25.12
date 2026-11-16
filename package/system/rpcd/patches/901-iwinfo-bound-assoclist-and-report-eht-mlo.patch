@@ -3,11 +3,17 @@ Subject: [PATCH] rpcd: bound association storage and report EHT/MLO safely
 
 Match the backend association capacity with zeroed heap storage, validate
 returned lengths, and close the backend on every exit. Report EHT DCM and
-only populated MLO link slots; legacy WEXT entries have no MLO metadata.
+only populated MLO slots, without claiming slot indices as Link IDs or
+unknown per-link MCS/NSS/GI. Legacy WEXT entries have no MLO metadata.
 
 --- a/iwinfo.c
 +++ b/iwinfo.c
-@@ -498,6 +498,7 @@
+@@ -494,10 +494,11 @@
+ 		blobmsg_add_u32(&buf, "he_gi", r->he_gi);
+ 		blobmsg_add_u32(&buf, "he_dcm", r->he_dcm);
+ 	}
+-	else if (r->is_eht) {
++	else if (r->is_eht && r->nss) {
  		blobmsg_add_u32(&buf, "mcs", r->mcs);
  		blobmsg_add_u32(&buf, "nss", r->nss);
  		blobmsg_add_u32(&buf, "eht_gi", r->eht_gi);
@@ -57,7 +63,7 @@ only populated MLO link slots; legacy WEXT entries have no MLO metadata.
  	{
  		for (i = 0; i < len; i += sizeof(struct iwinfo_assoclist_entry))
  		{
-@@ -581,6 +596,42 @@
+@@ -581,6 +596,43 @@
  			rpc_iwinfo_add_rateinfo(&a->tx_rate);
  			blobmsg_close_table(&buf, e);
  
@@ -73,7 +79,8 @@ only populated MLO link slots; legacy WEXT entries have no MLO metadata.
 +				         a->mld_mac[0], a->mld_mac[1], a->mld_mac[2],
 +				         a->mld_mac[3], a->mld_mac[4], a->mld_mac[5]);
 +				blobmsg_add_string(&buf, "mld_mac", mld_mac);
-+				blobmsg_add_u8(&buf, "mlo_link_id", a->mlo_link_id);
++				if (a->mlo_link_id < 3)
++					blobmsg_add_u8(&buf, "mlo_link_index", a->mlo_link_id);
 +				blobmsg_add_u8(&buf, "mlo_num_links", a->mlo_num_links);
 +
 +				mlo = blobmsg_open_array(&buf, "mlo_links");
@@ -85,7 +92,7 @@ only populated MLO link slots; legacy WEXT entries have no MLO metadata.
 +						continue;
 +
 +					link = blobmsg_open_table(&buf, NULL);
-+					blobmsg_add_u8(&buf, "link_id", j);
++					blobmsg_add_u8(&buf, "link_index", j);
 +					rate = blobmsg_open_table(&buf, "rx");
 +					rpc_iwinfo_add_rateinfo(&a->mlo_rx_rate[j]);
 +					blobmsg_close_table(&buf, rate);
@@ -100,7 +107,7 @@ only populated MLO link slots; legacy WEXT entries have no MLO metadata.
  			found = true;
  			if (!macaddr)
  				blobmsg_close_table(&buf, d);
-@@ -589,14 +640,15 @@
+@@ -589,14 +641,15 @@
  		}
  	}
  

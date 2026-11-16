@@ -68,6 +68,7 @@ static void mtk_parse_rateinfo(RT_802_11_MAC_ENTRY *p,
 {
     memset(rx, 0, sizeof(*rx)); memset(tx, 0, sizeof(*tx));
     rx->is_eht = tx->is_eht = 1;
+    rx->nss = tx->nss = 2;
     rx->eht_dcm = tx->eht_dcm = 1;
 }
 static struct mtk_station_information vendor;
@@ -91,7 +92,7 @@ enum { UBUS_STATUS_OK, UBUS_STATUS_NOT_FOUND, UBUS_STATUS_UNKNOWN_ERROR };
 static int rpc_assoclist_policy[__RPC_A_MAX];
 static struct blob_attr device_attr = { "rai0" }, mac_attr = { "FF:FF:FF:FF:FF:FF" };
 static int want_mac, closes, replies, mode, allocation_failure;
-static int tables, mlo_fields, link_mask, dcm_fields;
+static int tables, mlo_fields, link_mask, dcm_fields, nss_fields;
 static const struct iwinfo_ops *iw;
 static char *ifname = "rai0";
 static int fake_assoclist(const char *dev, char *out, int *len)
@@ -130,7 +131,7 @@ static void *blobmsg_data(struct blob_attr *m) { return (void *)m->text; }
 static void blobmsg_parse(const void *p, int n, struct blob_attr **tb, void *m, int l)
 { tb[RPC_A_DEVICE] = &device_attr; tb[RPC_A_MACADDR] = want_mac ? &mac_attr : NULL; }
 static void blob_buf_init(void *b, int n)
-{ tables = mlo_fields = link_mask = dcm_fields = 0; }
+{ tables = mlo_fields = link_mask = dcm_fields = nss_fields = 0; }
 static void *blobmsg_open_table(void *b, const char *n)
 { if (!n) tables++; return (void *)1; }
 static void *blobmsg_open_array(void *b, const char *n) { return (void *)1; }
@@ -142,7 +143,9 @@ static void number(const char *key, uint64_t value)
 {
     if (!strcmp(key, "mlo_enable")) mlo_fields++;
     if (!strcmp(key, "eht_dcm")) dcm_fields++;
-    if (!strcmp(key, "link_id")) { assert(value < 3); link_mask |= 1 << value; }
+    if (!strcmp(key, "nss")) { assert(value > 0); nss_fields++; }
+    assert(strcmp(key, "link_id") && strcmp(key, "mlo_link_id"));
+    if (!strcmp(key, "link_index")) { assert(value < 3); link_mask |= 1 << value; }
 }
 #define blobmsg_add_u8(b,k,v) number(k,v)
 #define blobmsg_add_u16(b,k,v) number(k,v)
@@ -187,24 +190,26 @@ int main(void)
     for (unsigned mask = 0; mask < 8; mask++) {
         struct iwinfo_assoclist_entry e = {0};
         memset(&vendor, 0, sizeof(vendor)); vendor.mlo_enable = 1;
+        e.mac[5] = vendor.mac[5] = 2;
         e.rx_rate.is_eht = e.tx_rate.is_eht = 1;
         e.rx_rate.mcs = e.tx_rate.mcs = 13;
         e.rx_rate.nss = e.tx_rate.nss = 2;
-        unsigned valid = 0, first = 3;
+        unsigned valid = 0;
         for (unsigned j = 0; j < 3; j++) {
             vendor.mlo_link[j].valid = !!(mask & (1 << j));
+            vendor.mlo_link[j].link_address[5] = j + 1;
             vendor.mlo_link[j].rx_rate = 100 + j;
             vendor.mlo_link[j].tx_rate = 200 + j;
-            if (vendor.mlo_link[j].valid) { valid++; if (first == 3) first = j; }
+            if (vendor.mlo_link[j].valid) valid++;
         }
         nl80211_mtk_fill_mlo("rai0", &e);
         assert(e.mlo_num_links == valid && e.mlo_enable == !!valid);
-        if (valid) assert(e.mlo_link_id == first);
+        if (valid) assert(e.mlo_link_id == (mask & 2 ? 1 : UINT8_MAX));
         for (unsigned j = 0; j < 3; j++) {
             assert(e.mlo_rx_rate[j].is_eht == !!(mask & (1 << j)));
             if (mask & (1 << j)) {
                 assert(e.mlo_rx_rate[j].rate == (100 + j) * 1000);
-                assert(e.mlo_rx_rate[j].nss == (valid == 1 ? 2 : 0));
+                assert(e.mlo_rx_rate[j].nss == (valid == 1 && j == 1 ? 2 : 0));
             }
         }
     }
@@ -214,14 +219,16 @@ int main(void)
     vendor.mlo_link[2].rx_rate = UINT32_MAX;
     nl80211_mtk_fill_mlo("rai0", &e);
     assert(e.mlo_num_links == 1 && e.mlo_rx_rate[2].rate == 0);
+    vendor.mac[5] = 99; memset(&e, 0, sizeof(e));
+    nl80211_mtk_fill_mlo("rai0", &e); assert(e.mlo_enable == 0);
     vendor_failure = 1; memset(&e, 0, sizeof(e));
     nl80211_mtk_fill_mlo("rai0", &e); assert(e.mlo_enable == 0);
 
-    mode = 0; assert(query() == UBUS_STATUS_OK && tables == n && !mlo_fields);
+    mode = 0; assert(query() == UBUS_STATUS_OK && tables == n && !mlo_fields && dcm_fields == 2 * n);
     mode = 1; assert(query() == UBUS_STATUS_OK && tables == n);
     for (mode = 2; mode <= 4; mode++) assert(query() == UBUS_STATUS_UNKNOWN_ERROR);
     mode = 5; assert(query() == UBUS_STATUS_OK && tables == 0);
-    mode = 6; assert(query() == UBUS_STATUS_OK && mlo_fields == 1 && link_mask == 6);
+    mode = 6; assert(query() == UBUS_STATUS_OK && mlo_fields == 1 && link_mask == 6 && !nss_fields && !dcm_fields);
     mode = 7; assert(query() == UBUS_STATUS_OK && mlo_fields == 0);
     allocation_failure = 1; assert(query() == UBUS_STATUS_UNKNOWN_ERROR);
     allocation_failure = 0; mode = 1; want_mac = 1;
