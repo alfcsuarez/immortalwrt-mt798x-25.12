@@ -1,0 +1,591 @@
+{
+  "status": "development checkpoint; not a production delivery",
+  "date": "2026-11-16",
+  "validation_environment": "cloud computer; no GitHub CI",
+  "framework": {
+    "passed": 109,
+    "total": 109,
+    "tests": [
+      {
+        "name": "syntax:lib/wifi/mtwifi.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:lib/netifd/utils.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:lib/netifd/wireless.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:lib/netifd/wireless-device.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:lib/netifd/wireless/mtwifi.sh",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/hostap/common.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/hostap/wdev.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/hostap/wifi-detect.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/iwinfo.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/mtwifi/supplicant.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/mtwifi/validate.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/mtwifi/caps.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/mtwifi/defs.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/mtwifi/common.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/mtwifi/wps-er.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/mtwifi/dat.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/mtwifi/hostapd.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/mtwifi/l1dat.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/mtwifi/scan-action.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/mtwifi/ifname.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/mtwifi/cfg.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/wifi/iface.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/wifi/supplicant.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/wifi/validate.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/wifi/netifd.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/wifi/common.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/wifi/ap.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/wifi/hostapd.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "syntax:usr/share/ucode/wifi/utils.uc",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "L1:deduplicate-three-band-alias",
+        "passed": true,
+        "detail": "['MT7990_1_1', 'MT7990_1_2', 'MT7990_2']"
+      },
+      {
+        "name": "DAT:missing-profile",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "DAT:atomic-permissions-duplicates-token-slots",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "WPS:radio-prefix-isolation",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "profile:2g:HT20",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:2g:HT40",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:2g:HE20",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:2g:HE40",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:2g:EHT20",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:2g:EHT40",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:5g:VHT20",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:5g:VHT40",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:5g:VHT80",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:5g:VHT160",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:5g:HE20",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:5g:HE40",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:5g:HE80",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:5g:HE160",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:5g:EHT20",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:5g:EHT40",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:5g:EHT80",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:5g:EHT160",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:6g:HE20",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:6g:HE40",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:6g:HE80",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:6g:HE160",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:6g:EHT20",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:6g:EHT40",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:6g:EHT80",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:6g:EHT160",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:6g:EHT320",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:6g:EHT320-1",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "profile:6g:EHT320-2",
+        "passed": true,
+        "detail": "output='ok', changed=[]"
+      },
+      {
+        "name": "hostapd:2g:HT20",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:2g:HT40",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:2g:HE20",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:2g:HE40",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:2g:EHT20",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:2g:EHT40",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:5g:VHT20",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:5g:VHT40",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:5g:VHT80",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:5g:VHT160",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:5g:HE20",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:5g:HE40",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:5g:HE80",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:5g:HE160",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:5g:EHT20",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:5g:EHT40",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:5g:EHT80",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:5g:EHT160",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:6g:HE20",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:6g:HE40",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:6g:HE80",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:6g:HE160",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:6g:EHT20",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:6g:EHT40",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:6g:EHT80",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:6g:EHT160",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:6g:EHT320",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:6g:EHT320-1",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:6g:EHT320-2",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "hostapd:failed-attach-restores-config",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "validation:reject:0",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "validation:reject:1",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "validation:reject:2",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "validation:reject:3",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "validation:reject:4",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "validation:reject:5",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "validation:reject:6",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "validation:reject:7",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "transaction:commit-rollback-partial-write-failure",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "transaction:process-exit-releases-lock",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "handler:failed-attach-no-up-and-restored-profiles",
+        "passed": true,
+        "detail": "mtwifi: hostapd rejected configuration for phy1\n"
+      },
+      {
+        "name": "handler:one-up-after-successful-attach",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "handler:identical-reload",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "handler:structural-change-keeps-profiles-and-driver",
+        "passed": true,
+        "detail": "mtwifi: structural profile change requires a device restart; keeping the previous profile\n"
+      },
+      {
+        "name": "detect:preserve-wireless-settings",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "detect:idempotent",
+        "passed": true,
+        "detail": ""
+      },
+      {
+        "name": "detect:no-duplicate-6GHz-alias",
+        "passed": true,
+        "detail": ""
+      }
+    ],
+    "scope": "Native ucode/UCI/filesystem; radio capabilities and daemon replies require hardware integration tests."
+  },
+  "hostapd_patch_replay": {
+    "total": 246,
+    "failed": 0
+  },
+  "native_components": [
+    {
+      "name": "hostapd",
+      "exit_code": 0
+    },
+    {
+      "name": "wpa_supplicant",
+      "exit_code": 0
+    }
+  ],
+  "native_wpad_link_passed": true,
+  "arm64_dependencies": [
+    "json-c 0.18",
+    "zlib 1.3.1",
+    "libubox",
+    "ubus",
+    "uci",
+    "libnl-tiny",
+    "ucode",
+    "udebug",
+    "OpenSSL 3.5.9"
+  ],
+  "remaining": [
+    "ARM64 wpad build",
+    "cfg80211 build: mac80211 patch 390 context mismatch",
+    "OSAL/WiFi7 cfg80211 build",
+    "hardware AP/STA, MLO, throughput and reboot regressions"
+  ],
+  "production_default": "WEXT unchanged",
+  "source_reference": "38666f1d78047eb78036fa4d2b7b96880cefcaa3"
+}
