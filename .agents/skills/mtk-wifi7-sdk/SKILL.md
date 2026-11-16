@@ -10,7 +10,7 @@ description: Use when analyzing or changing this repository's MTK vendor Wi-Fi 7
 From this skill directory, the repository root is `../../..`.
 Read [the applicability snapshot](../../../package/mtk/pdf/knowledge/applicability.md)
 and [the topic index](../../../package/mtk/pdf/knowledge/README.md) first.
-The source PDF manifest is `package/mtk/pdf/manifest.json`; each document has a
+The source PDF index is `package/mtk/pdf/knowledge/index.json`; each document has a
 stable ID, physical page count, upstream pinned URL and checksum.
 
 Load only the notes/pages needed for the task. Do not load all 721 pages into

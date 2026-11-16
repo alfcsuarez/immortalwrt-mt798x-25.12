@@ -3,7 +3,7 @@
 2026-11-16 从用户指定的 `benboguan/immortalwrt-mt799x` 固定提交
 `38666f1d78047eb78036fa4d2b7b96880cefcaa3` 引入 10 个参考归档。
 逐项 SHA-256、上游 Git blob SHA-1、大小、原 URL、源码/ELF 数量和许可证成员见
-[`package/mtk/pdf/source-cache.json`](../package/mtk/pdf/source-cache.json)。
+[`package/mtk/pdf/knowledge/index.json`](../package/mtk/pdf/knowledge/index.json) 的 `source_cache` 部分。
 
 | 新归档 | 用途 |
 | --- | --- |

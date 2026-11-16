@@ -5,7 +5,7 @@ description: Use when comparing, importing or validating MTK SDK archives and fi
 
 # MTK source cache and provenance
 
-Read [the source-cache inventory](../../../package/mtk/pdf/source-cache.json),
+Read the `source_cache` section of [the reference index](../../../package/mtk/pdf/knowledge/index.json),
 [the dl explanation](../../../dl/README.mtk-reference.md) and the current package
 Makefiles before proposing archive or driver changes.
 

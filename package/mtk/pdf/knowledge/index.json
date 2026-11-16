@@ -1,5 +1,5 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "import_date": "2026-11-16",
   "upstream": {
     "repository": "benboguan/immortalwrt-mt799x",
@@ -294,8 +294,235 @@
     "method": "pdftotext -layout, preserving physical page boundaries; selected screenshot pages supplemented by unverified tesseract eng OCR"
   },
   "source_cache": {
-    "file": "source-cache.json",
-    "sha256": "37e8d3be0b6f7d4c1dd9dbc9fb3124fd7d64e1193d48d210d1c55442e1030921"
+    "format_version": 1,
+    "upstream": {
+      "repository": "benboguan/immortalwrt-mt799x",
+      "branch": "openwrt-25.12-mtwifi",
+      "commit": "38666f1d78047eb78036fa4d2b7b96880cefcaa3"
+    },
+    "archives": [
+      {
+        "file": "dl/1905daemon-42cf90.tar.bz2",
+        "bytes": 714148,
+        "sha256": "0215bbf924350e982b9bb28cdc91ba7e82d8100cbe592da04bac8a008a9feb37",
+        "upstream_git_blob_sha1": "25b1c994be09df471f80b6205d939803bda85181",
+        "url": "https://raw.githubusercontent.com/benboguan/immortalwrt-mt799x/38666f1d78047eb78036fa4d2b7b96880cefcaa3/dl/1905daemon-42cf90.tar.bz2",
+        "mirrored": true,
+        "status": "reference-only",
+        "reason": "Offline source comparison and documentation; not selected by new runtime packages.",
+        "regular_files": 256,
+        "source_files": 239,
+        "elf_files": 0,
+        "license_members": [
+          "1905daemon/LICENSE"
+        ]
+      },
+      {
+        "file": "dl/datconf-19d67f.tar.bz2",
+        "bytes": 13385,
+        "sha256": "9578a7020222551b2c7abe6b9705ed4c86fb05d84a743c43f0b2b6647196fbba",
+        "upstream_git_blob_sha1": "ba662372365118d0d203fe16f85c662f7d387d6d",
+        "url": "https://raw.githubusercontent.com/benboguan/immortalwrt-mt799x/38666f1d78047eb78036fa4d2b7b96880cefcaa3/dl/datconf-19d67f.tar.bz2",
+        "mirrored": true,
+        "status": "reference-only",
+        "reason": "Offline source comparison and documentation; not selected by new runtime packages.",
+        "regular_files": 12,
+        "source_files": 8,
+        "elf_files": 0,
+        "license_members": []
+      },
+      {
+        "file": "dl/fwdd-1f6e18.tar.bz2",
+        "bytes": 12870,
+        "sha256": "33be4bc00f34650e5b93ef2260e01bee1eeae84f068ec6d08c8c5317a2bad9fc",
+        "upstream_git_blob_sha1": "e0fa8d3b77f877971cba241ddcd0690111c54940",
+        "url": "https://raw.githubusercontent.com/benboguan/immortalwrt-mt799x/38666f1d78047eb78036fa4d2b7b96880cefcaa3/dl/fwdd-1f6e18.tar.bz2",
+        "mirrored": true,
+        "status": "already-present",
+        "reason": "Existing identical archive; keep current package selection.",
+        "regular_files": 3,
+        "source_files": 1,
+        "elf_files": 0,
+        "license_members": [
+          "fwdd/LICENSE"
+        ]
+      },
+      {
+        "file": "dl/libmapd-e1e011.tar.bz2",
+        "bytes": 23048,
+        "sha256": "bef9dc87e10fd0853756502b9b8f41711b3406b4139900114b85972fcda24b2e",
+        "upstream_git_blob_sha1": "0e9f45eecea65ee11be7042fa7be9bb5a70f7a1b",
+        "url": "https://raw.githubusercontent.com/benboguan/immortalwrt-mt799x/38666f1d78047eb78036fa4d2b7b96880cefcaa3/dl/libmapd-e1e011.tar.bz2",
+        "mirrored": true,
+        "status": "reference-only",
+        "reason": "Offline source comparison and documentation; not selected by new runtime packages.",
+        "regular_files": 9,
+        "source_files": 7,
+        "elf_files": 0,
+        "license_members": []
+      },
+      {
+        "file": "dl/libwpactrl-dcc1d7.tar.bz2",
+        "bytes": 17929,
+        "sha256": "3d96a1512405194695e30e3e702a9b6fa865989bec92b1e9d7f5e4ce17a780a5",
+        "upstream_git_blob_sha1": "a3e7e980a11518b98b53c6b7e9ea04178a51a67d",
+        "url": "https://raw.githubusercontent.com/benboguan/immortalwrt-mt799x/38666f1d78047eb78036fa4d2b7b96880cefcaa3/dl/libwpactrl-dcc1d7.tar.bz2",
+        "mirrored": true,
+        "status": "reference-only",
+        "reason": "Offline source comparison and documentation; not selected by new runtime packages.",
+        "regular_files": 3,
+        "source_files": 2,
+        "elf_files": 0,
+        "license_members": []
+      },
+      {
+        "file": "dl/mapd-9742ce.tar.bz2",
+        "bytes": 2411198,
+        "sha256": "0ea8a7e2c027eed83ee31416555b60490db7b59882d58c138c3ec167dc82b4d0",
+        "upstream_git_blob_sha1": "271c9904644db9eee096d501c911c65826e83702",
+        "url": "https://raw.githubusercontent.com/benboguan/immortalwrt-mt799x/38666f1d78047eb78036fa4d2b7b96880cefcaa3/dl/mapd-9742ce.tar.bz2",
+        "mirrored": true,
+        "status": "reference-only",
+        "reason": "Offline source comparison and documentation; not selected by new runtime packages.",
+        "regular_files": 133,
+        "source_files": 91,
+        "elf_files": 7,
+        "license_members": []
+      },
+      {
+        "file": "dl/mapfilter-70fcdd.tar.bz2",
+        "bytes": 27388,
+        "sha256": "fdf535f7c74ec91f5866fc7f649832c13d4674bc0ff602a4ea1c2638630c4f2f",
+        "upstream_git_blob_sha1": "eb9da75fc4b53f0cdbd009d1b4d25051ecdd878e",
+        "url": "https://raw.githubusercontent.com/benboguan/immortalwrt-mt799x/38666f1d78047eb78036fa4d2b7b96880cefcaa3/dl/mapfilter-70fcdd.tar.bz2",
+        "mirrored": true,
+        "status": "reference-only",
+        "reason": "Offline source comparison and documentation; not selected by new runtime packages.",
+        "regular_files": 15,
+        "source_files": 13,
+        "elf_files": 0,
+        "license_members": []
+      },
+      {
+        "file": "dl/mt799x_20250613-415824-bin.tar.xz",
+        "bytes": 75607648,
+        "sha256": "97b0a06d9e7bc40f367861dade4009076857970d5f5f8e0a1464a904348ea541",
+        "upstream_git_blob_sha1": "21efc634ce1a056c98e3095ac80acd1f8690c938",
+        "url": "https://raw.githubusercontent.com/benboguan/immortalwrt-mt799x/38666f1d78047eb78036fa4d2b7b96880cefcaa3/dl/mt799x_20250613-415824-bin.tar.xz",
+        "mirrored": false,
+        "status": "not-imported",
+        "reason": "Fallback binary archive is not a newer BE14 firmware; retain current board-specific selection."
+      },
+      {
+        "file": "dl/mt799x_20250613-415824.tar.xz",
+        "bytes": 53302544,
+        "sha256": "1019dcf2c9f6c4f8408d4c20c77b3e02c818bd5a85b3423e0e6d0454ae364fb5",
+        "upstream_git_blob_sha1": "a37ec5750cbc682e68deed43e3e515a1113cb00c",
+        "url": "https://raw.githubusercontent.com/benboguan/immortalwrt-mt799x/38666f1d78047eb78036fa4d2b7b96880cefcaa3/dl/mt799x_20250613-415824.tar.xz",
+        "mirrored": true,
+        "status": "reference-only",
+        "reason": "Offline source comparison and documentation; not selected by new runtime packages.",
+        "regular_files": 1322,
+        "source_files": 1138,
+        "elf_files": 3,
+        "license_members": []
+      },
+      {
+        "file": "dl/mt_wifi_osal-a53418.tar.xz",
+        "bytes": 90872,
+        "sha256": "dfa4b178f198504a707dec957242f8ede1a732823e940faa6304c723ac3224ad",
+        "upstream_git_blob_sha1": "0c481a574174ba08e3d493c71e62369dcfcd2927",
+        "url": "https://raw.githubusercontent.com/benboguan/immortalwrt-mt799x/38666f1d78047eb78036fa4d2b7b96880cefcaa3/dl/mt_wifi_osal-a53418.tar.xz",
+        "mirrored": true,
+        "status": "already-present",
+        "reason": "Existing identical archive; keep current package selection.",
+        "regular_files": 58,
+        "source_files": 52,
+        "elf_files": 0,
+        "license_members": [
+          "wifi_osal/LICENSES/LICENSE.GPL-2.0",
+          "wifi_osal/LICENSES/LICENSE.BSD-3-Clause",
+          "wifi_osal/LICENSES/LICENSE.MTK"
+        ]
+      },
+      {
+        "file": "dl/mtfwd-30b1ab.tar.bz2",
+        "bytes": 9487,
+        "sha256": "5fda8adde31ccd62acd608147be9d988a4e4228b8616dc145ab274bb1598fc58",
+        "upstream_git_blob_sha1": "c40c880acf191cb71f0db01378b1209ee4bb4c5f",
+        "url": "https://raw.githubusercontent.com/benboguan/immortalwrt-mt799x/38666f1d78047eb78036fa4d2b7b96880cefcaa3/dl/mtfwd-30b1ab.tar.bz2",
+        "mirrored": true,
+        "status": "reference-only",
+        "reason": "Offline source comparison and documentation; not selected by new runtime packages.",
+        "regular_files": 4,
+        "source_files": 1,
+        "elf_files": 0,
+        "license_members": [
+          "mtfwd/LICENSE"
+        ]
+      },
+      {
+        "file": "dl/wappd-24f7e6.tar.bz2",
+        "bytes": 961804,
+        "sha256": "85c72db8e2a0972a55d8d541a098426b0c11d2139590ee26a804959cfbbc2748",
+        "upstream_git_blob_sha1": "74eac97c591c8c9396ddbe5344b4cfa35b306109",
+        "url": "https://raw.githubusercontent.com/benboguan/immortalwrt-mt799x/38666f1d78047eb78036fa4d2b7b96880cefcaa3/dl/wappd-24f7e6.tar.bz2",
+        "mirrored": true,
+        "status": "reference-only",
+        "reason": "Offline source comparison and documentation; not selected by new runtime packages.",
+        "regular_files": 196,
+        "source_files": 139,
+        "elf_files": 0,
+        "license_members": [
+          "wappd/LICENSE"
+        ]
+      },
+      {
+        "file": "dl/warp_20250613-433271.tar.xz",
+        "bytes": 427952,
+        "sha256": "cb92f8bdb300316c3e62ab688f05b2c1fe2b84a5d29c8b49ee9410e04a0fd07a",
+        "upstream_git_blob_sha1": "37642f756c0595f932c03b80288b976d31c03813",
+        "url": "https://raw.githubusercontent.com/benboguan/immortalwrt-mt799x/38666f1d78047eb78036fa4d2b7b96880cefcaa3/dl/warp_20250613-433271.tar.xz",
+        "mirrored": true,
+        "status": "reference-only",
+        "reason": "Offline source comparison and documentation; not selected by new runtime packages.",
+        "regular_files": 113,
+        "source_files": 107,
+        "elf_files": 1,
+        "license_members": []
+      },
+      {
+        "file": "dl/wificonf-253451.tar.bz2",
+        "bytes": 5800,
+        "sha256": "8a4dddc4433eef90a8a56cc1a54be5c013ce65fb21ba5d309dbb3c64a9d6cc77",
+        "upstream_git_blob_sha1": "cb420ef95292a0aa5efffa7ba1866726224f450d",
+        "url": "https://raw.githubusercontent.com/benboguan/immortalwrt-mt799x/38666f1d78047eb78036fa4d2b7b96880cefcaa3/dl/wificonf-253451.tar.bz2",
+        "mirrored": true,
+        "status": "already-present",
+        "reason": "Existing identical archive; keep current package selection.",
+        "regular_files": 4,
+        "source_files": 1,
+        "elf_files": 0,
+        "license_members": []
+      }
+    ],
+    "preserved_build_inputs": [
+      {
+        "file": "dl/mtk-r4-wifi-f5bd1d7389c8-src.tar.xz",
+        "sha256": "3afc9471cd5acd18c5dbf232c3842ae18ad197dba70fa8c9ba27f3f6779e6bb5",
+        "bytes": 38903924
+      },
+      {
+        "file": "dl/mtk-r4-wifi-f5bd1d7389c8-bin.tar.xz",
+        "sha256": "2b6aadce7441cb396f2abc25a803538d924b205ae45ff69b95b89db9861c3533",
+        "bytes": 56415048
+      },
+      {
+        "file": "dl/datconf-757f9679.tar.bz2",
+        "sha256": "3cbb7489e3df1be52d184b600129a6081e7225981acdbcc5c2cb7149f11c37f1",
+        "bytes": 13114
+      }
+    ]
   },
   "source_map": {
     "file": "knowledge/source-map.json",

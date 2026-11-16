@@ -1,6 +1,6 @@
 # DFS 与专用接收链路的零等待 DFS
 
-文档 ID：`dfs`。来源：`Eagle_DFS_ZW_DFS_AN_V1.0_230217 (1).pdf`，11 页。主要技术依据：PDF 第 2–9 页。原件与逐页文本的关系见 [资料入口](../README.md)。
+文档 ID：`dfs`。来源：`Eagle_DFS_ZW_DFS_AN_V1.0_230217 (1).pdf`，11 页。主要技术依据：PDF 第 2–9 页。原件与逐页文本的关系见 [资料入口](README.md)。
 
 ## 机制与前置条件
 

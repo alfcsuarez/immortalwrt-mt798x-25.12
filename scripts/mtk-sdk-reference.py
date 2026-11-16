@@ -64,7 +64,7 @@ def verify(manifest):
         note = relative_file(REFERENCE, document["analysis"])
         if not note.is_file() or not note.read_text(encoding="utf-8").strip():
             raise ValueError(f"Missing analysis: {document['id']}")
-    for key in ("page_index", "source_cache", "source_map"):
+    for key in ("page_index", "source_map"):
         checked_file(REFERENCE, manifest[key])
     seen, ocr_seen = set(), set()
     for row in page_rows(manifest):
@@ -86,7 +86,7 @@ def verify(manifest):
         raise ValueError("Page index coverage does not match the PDFs")
     if ocr_seen != expected_ocr or len(ocr_seen) != manifest["page_index"]["ocr_pages"]:
         raise ValueError("OCR coverage does not match the manifest")
-    cache = read_json(relative_file(REFERENCE, manifest["source_cache"]["file"]))
+    cache = manifest["source_cache"]
     mirrored = [entry for entry in cache["archives"] if entry["mirrored"]]
     for entry in mirrored:
         checked_file(REPO, entry, git_blob=True)
@@ -133,12 +133,12 @@ def show_page(manifest, args):
 
 
 def archive_record(manifest, name):
-    cache = read_json(relative_file(REFERENCE, manifest["source_cache"]["file"]))
+    cache = manifest["source_cache"]
     name = name.removeprefix("dl/")
     for entry in cache["archives"] + cache["preserved_build_inputs"]:
         if entry["file"] == "dl/" + name:
             if entry.get("mirrored", True) is False:
-                raise ValueError("Archive was intentionally not imported; see source-cache.json")
+                raise ValueError("Archive was intentionally not imported; see knowledge/index.json")
             return entry, checked_file(REPO, entry, git_blob=True)
     raise ValueError("Archive is not in the reference manifest")
 
@@ -226,10 +226,10 @@ def main():
     find_archive.add_argument("query")
     find_archive.add_argument("--limit", type=positive, default=10)
     args = parser.parse_args()
-    manifest = read_json(REFERENCE / "manifest.json")
+    manifest = read_json(REFERENCE / "knowledge/index.json")
     document = getattr(args, "doc", None)
     if document and document not in {entry["id"] for entry in manifest["documents"]}:
-        parser.error("Unknown document ID; see package/mtk/pdf/manifest.json")
+        parser.error("Unknown document ID; see package/mtk/pdf/knowledge/index.json")
     if args.command == "archive-search" and not args.query:
         parser.error("Search text must not be empty")
     if args.command == "verify":
