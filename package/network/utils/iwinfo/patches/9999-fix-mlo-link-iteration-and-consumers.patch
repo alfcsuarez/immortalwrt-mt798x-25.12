@@ -1,0 +1,149 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] iwinfo: iterate valid MLO links and preserve station identity
+
+Inspect all three vendor link slots before deriving the link count. Keep
+sparse slot IDs in every consumer, and do not invent per-link PHY data
+from aggregate rates on a multi-link connection. Bound Mbps conversion.
+Keep the Lua station key independent of the MLD address.
+
+--- a/iwinfo_nl80211.c
++++ b/iwinfo_nl80211.c
+@@ -2287,10 +2287,8 @@
+ 	}
+ 
+ 	if (si.mlo_enable) {
+-		e->mlo_enable = 1;
+-		memcpy(e->mld_mac, si.mld_mac, 6);
+-
+-		for (j = 0; j < e->mlo_num_links && j < 3; j++) {
++		e->mlo_num_links = 0;
++		for (j = 0; j < 3; j++) {
+ 			struct iwinfo_rate_entry *rx = &e->mlo_rx_rate[j];
+ 			struct iwinfo_rate_entry *tx = &e->mlo_tx_rate[j];
+ 
+@@ -2300,8 +2298,10 @@
+ 				first = j;
+ 
+ 			/* MTK is Mbps, iwinfo use kbps */
+-			rx->rate = (uint32_t)(si.mlo_link[j].rx_rate * 1000);
+-			tx->rate = (uint32_t)(si.mlo_link[j].tx_rate * 1000);
++			if (si.mlo_link[j].rx_rate <= UINT32_MAX / 1000)
++				rx->rate = si.mlo_link[j].rx_rate * 1000;
++			if (si.mlo_link[j].tx_rate <= UINT32_MAX / 1000)
++				tx->rate = si.mlo_link[j].tx_rate * 1000;
+ 
+ 			/* MLO => EHT */
+ 			rx->is_eht = 1;
+@@ -2310,32 +2310,31 @@
+ 			rx->eht_dcm = si.rx_dcm;
+ 			tx->eht_dcm = si.tx_dcm;
+ 
+-			if (rx->is_eht && !rx->eht_gi)
+-				rx->eht_gi = e->rx_rate.eht_gi;
+-			if (tx->is_eht && !tx->eht_gi)
+-				tx->eht_gi = e->tx_rate.eht_gi;
+-
+-			if (e->mlo_num_links == 1) {
+-				if (!rx->mhz && !rx->mhz_hi) {
+-					rx->mhz      = e->rx_rate.mhz;
+-					rx->mhz_hi   = e->rx_rate.mhz_hi;
+-					rx->is_40mhz = e->rx_rate.is_40mhz;
+-				}
+-				if (!tx->mhz && !tx->mhz_hi) {
+-					tx->mhz      = e->tx_rate.mhz;
+-					tx->mhz_hi   = e->tx_rate.mhz_hi;
+-					tx->is_40mhz = e->tx_rate.is_40mhz;
+-				}
+-				if (!rx->nss) rx->nss = e->rx_rate.nss;
+-				if (!tx->nss) tx->nss = e->tx_rate.nss;
+-				if (!rx->mcs) rx->mcs = e->rx_rate.mcs;
+-				if (!tx->mcs) tx->mcs = e->tx_rate.mcs;
+-			}
+-
+ 			e->mlo_num_links++;
+ 		}
+ 
+-		e->mlo_link_id = (first >= 0) ? (uint8_t)first : 0;
++		if (first < 0)
++			return;
++
++		e->mlo_enable = 1;
++		memcpy(e->mld_mac, si.mld_mac, 6);
++		e->mlo_link_id = first;
++
++		/* The vendor ABI has no per-link MCS, NSS, bandwidth or GI.
++		 * Aggregate rate metadata describes a link only when it is alone.
++		 */
++		if (e->mlo_num_links == 1) {
++			struct iwinfo_rate_entry *rx = &e->mlo_rx_rate[first];
++			struct iwinfo_rate_entry *tx = &e->mlo_tx_rate[first];
++			uint32_t rx_rate = rx->rate, tx_rate = tx->rate;
++
++			if (e->rx_rate.is_eht)
++				*rx = e->rx_rate;
++			if (e->tx_rate.is_eht)
++				*tx = e->tx_rate;
++			rx->rate = rx_rate;
++			tx->rate = tx_rate;
++		}
+ 	}
+ }
+ 
+--- a/iwinfo_cli.c
++++ b/iwinfo_cli.c
+@@ -875,8 +875,11 @@
+ 			       e->mlo_num_links,
+ 			       e->mlo_link_id);
+ 
+-			for (j = 0; j < e->mlo_num_links && j < 3; j++)
++			for (j = 0; j < 3; j++)
+ 			{
++				if (!e->mlo_rx_rate[j].is_eht && !e->mlo_tx_rate[j].is_eht)
++					continue;
++
+ 				printf("	  link[%d] RX: %-38s\n", j,
+ 				       format_assocrate(&e->mlo_rx_rate[j]));
+ 				printf("	  link[%d] TX: %-38s\n", j,
+--- a/iwinfo_lua.c
++++ b/iwinfo_lua.c
+@@ -391,13 +391,15 @@
+ 			set_rateinfo(L, &e->tx_rate, false);
+ 
+ 			if (e->mlo_enable) {
++				char mld_mac[18];
++
+ 				lua_pushboolean(L, 1);
+ 				lua_setfield(L, -2, "mlo_enable");
+ 
+-				sprintf(macstr, "%02X:%02X:%02X:%02X:%02X:%02X",
++				snprintf(mld_mac, sizeof(mld_mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+ 				        e->mld_mac[0], e->mld_mac[1], e->mld_mac[2],
+ 				        e->mld_mac[3], e->mld_mac[4], e->mld_mac[5]);
+-				lua_pushstring(L, macstr);
++				lua_pushstring(L, mld_mac);
+ 				lua_setfield(L, -2, "mld_mac");
+ 
+ 				lua_pushinteger(L, e->mlo_link_id);
+@@ -408,8 +410,11 @@
+ 
+ 				lua_newtable(L);
+ 				{
+-					int j;
+-					for (j = 0; j < e->mlo_num_links && j < 3; j++) {
++					int j, n = 0;
++					for (j = 0; j < 3; j++) {
++						if (!e->mlo_rx_rate[j].is_eht && !e->mlo_tx_rate[j].is_eht)
++							continue;
++
+ 						lua_newtable(L);
+ 
+ 						lua_newtable(L);
+@@ -422,7 +427,7 @@
+ 						lua_pushinteger(L, j);
+ 						lua_setfield(L, -2, "link_id");
+ 
+-						lua_rawseti(L, -2, j + 1);
++						lua_rawseti(L, -2, ++n);
+ 					}
+ 				}
+ 				lua_setfield(L, -2, "mlo_links");
