@@ -1,0 +1,63 @@
+From: alfcsuarez <alfonsoc.suarez@gmail.com>
+Subject: [PATCH] mediatek: hnat: fix DSA wan VLAN and bridge offload binding
+
+1. Include IS_DSA_WAN(dev) in IS_WAN(dev) so DSA WAN ports named "wan"
+   (e.g. after VLAN 1074 unwrapping on wan.1074) are accepted by
+   mtk_hnat_nf_post_routing and skb_to_hnat_info even when DTS sets
+   mtketh-wan = "eth1".
+2. In mtk_hnat_ipv4_nf_pre_routing, do not treat -EINVAL from
+   ndo_flow_offload_check(&hw_path) (returned by DSA when
+   DEV_PATH_ETHERNET is unset on VLAN-over-DSA ingress like wan.1074)
+   as an algorithm exclusion (skb_hnat_alg = 1).
+3. Remove the non-tunnel bridge DEV_PATH_ETHERNET injection in
+   mtk_hnat_nf_post_routing so NF_INET_POST_ROUTING defers br-lan to
+   NF_BR_POST_ROUTING (mtk_hnat_br_nf_local_out) instead of letting
+   dsa_flow_offload_check overwrite hw_path.dev with the eth0 conduit.
+
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
+@@ -1250,6 +1250,7 @@ enum FoeIpAct {
+ #define LAN2_DEV_NAME hnat_priv->lan2
+ #define IS_WAN(dev)                                                            \
+ 	((!strncmp((dev)->name, hnat_priv->wan, strlen(hnat_priv->wan))) ||		\
++	 IS_DSA_WAN(dev) ||							\
+ 	 IS_BOND(dev))
+ #define IS_LAN_GRP(dev) (IS_LAN(dev) | IS_LAN2(dev))
+ #define IS_LAN(dev)								\
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -1491,9 +1491,11 @@ mtk_hnat_ipv4_nf_pre_routing(void *priv,
+ 	 */
+ 	if (skb_hnat_iface(skb) == FOE_MAGIC_GE_VIRTUAL
+ 	    && skb->dev->netdev_ops->ndo_flow_offload_check) {
+-		if (skb->dev->netdev_ops->ndo_flow_offload_check(&hw_path) ||
++		int path_err = skb->dev->netdev_ops->ndo_flow_offload_check(&hw_path);
++
++		if ((path_err && path_err != -EINVAL) ||
+ 		    ((hw_path.flags & BIT(DEV_PATH_TNL)) &&
+ 		     !hnat_tunnel_rx_current(skb, state->in)))
+ 			skb_hnat_alg(skb) = 1;
+ 	}
+ 
+@@ -4688,21 +4690,6 @@ static unsigned int mtk_hnat_nf_post_rou
+ 		}
+ 	}
+ #endif
+-	if (netif_is_bridge_master(route_out) && !(hw_path.flags & BIT(DEV_PATH_ETHERNET))) {
+-		if (br_vlan_enabled(route_out)) {
+-			if (skb_vlan_tag_present(skb))
+-				hw_path.vlan_id = skb_vlan_tag_get_id(skb);
+-		}
+-
+-		if (fn && fn(skb, arp_dev, &hw_path)) {
+-			hnat_diag_note(skb, HNAT_DIAG_NO_ROUTE, 0, 0, -1, 0, -1);
+-			return 0;
+-		}
+-		ether_addr_copy(hw_path.eth_dest, eth_hdr(skb)->h_dest);
+-		ether_addr_copy(hw_path.eth_src, eth_hdr(skb)->h_source);
+-		hw_path.flags |= BIT(DEV_PATH_ETHERNET);
+-	}
+-
+ 	if (out->netdev_ops->ndo_flow_offload_check) {
+ 		path_err = out->netdev_ops->ndo_flow_offload_check(&hw_path);
+ 		/* A failed/partial resolution cannot supply a device or hardware
