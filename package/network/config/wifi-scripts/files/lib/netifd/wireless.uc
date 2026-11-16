@@ -181,7 +181,7 @@ function config_init(uci)
 			let config = parse_attribute_list(data, handler.iface);
 			config.radios = radios;
 
-			if (mlo_vif && !mlo_created) {
+			if (mlo_vif && handler.name == "mac80211" && !mlo_created) {
 				ifname = mlo_vif_create(config, radio_config, vif_idx, mlo_vifs);
 				mlo_created = true;
 			}
@@ -317,7 +317,7 @@ function config_init(uci)
 						radio_config = filter(radio_config, (v) => v != null);
 						let ifname;
 
-						if (mlo_vif) {
+						if (mlo_vif && devices[devs[0]]?.config?.type == "mac80211") {
 							ifname = mlo_vif_create(config, radio_config, vif_idx, mlo_vifs);
 							mlo_vifs[ifname].radios = radios;
 						}

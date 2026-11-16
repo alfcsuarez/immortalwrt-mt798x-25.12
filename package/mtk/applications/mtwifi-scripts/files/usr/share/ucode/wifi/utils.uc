@@ -21,7 +21,7 @@ function phy_path_match(phy, path) {
 }
 
 function __find_phy_by_path(phys, path) {
-	if (!path)
+	if (!phys || !path)
 		return null;
 
 	path = split(path, "+");
@@ -32,6 +32,8 @@ function __find_phy_by_path(phys, path) {
 }
 
 function find_phy_by_macaddr(phys, macaddr) {
+	if (!phys || !macaddr)
+		return null;
 	macaddr = lc(macaddr);
 	return filter(phys, (phy) => phy_file(phy, "macaddress") == macaddr)[0];
 }
@@ -104,7 +106,9 @@ function find_phy_by_name(phys, name, rename) {
 }
 
 export function find_phy(config, rename) {
-	let phys = lsdir("/sys/class/ieee80211");
+	let phys = lsdir("/sys/class/ieee80211") || [];
+	if (!length(phys))
+		return null;
 
 	return find_phy_by_path(phys, config.path) ??
 	       find_phy_by_macaddr(phys, config.macaddr) ??

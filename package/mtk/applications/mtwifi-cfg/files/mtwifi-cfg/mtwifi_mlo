@@ -151,7 +151,7 @@ local function save_state(state)
 	if fs.chmod and not fs.chmod(STATE_DIR, 448) then return false end -- 0700
 	local tmp = STATE_FILE .. ".tmp." .. tostring(nixio.getpid())
 	local flags = nixio.open_flags("wronly", "creat", "excl", "sync")
-	local file = nixio.open(tmp, flags, 384) -- 0600
+	local file = nixio.open(tmp, flags, "0600") -- 0600
 	if not file then return false end
 	local data = cjson.encode(state) .. "\n"
 	local written = file:write(data)
@@ -169,7 +169,7 @@ local function save_state(state)
 end
 
 local function acquire_lock()
-	local fd = nixio.open(LOCK_FILE, nixio.open_flags("rdwr", "creat"), 384) -- 0600
+	local fd = nixio.open(LOCK_FILE, nixio.open_flags("rdwr", "creat"), "0600") -- 0600
 	if not fd then return false end
 	if not fd:lock("tlock") then fd:close(); return false end
 	lock_fd = fd
