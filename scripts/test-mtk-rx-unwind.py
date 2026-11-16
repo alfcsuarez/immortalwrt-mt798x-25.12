@@ -50,8 +50,8 @@ typedef uint32_t u32;
 #define MTK_HAS_CAPS(c,m) ((c)&(m))
 #define RX_DMA_LSO 1
 #define RX_DMA_PREP_PLEN0(v) (v)
-#define RX_DMA_PREP_ADDR64(v) 0
-#define RX_DMA_GET_ADDR64(v) 0
+#define RX_DMA_PREP_ADDR64(v) (((v) >> 32) & 0xf)
+#define RX_DMA_GET_ADDR64(v) (((u64)(v) & 0xf) << 32)
 #define IS_ERR(p) ((uintptr_t)(p)>(uintptr_t)-4096)
 #define PTR_ERR(p) ((intptr_t)(p))
 #define rcu_access_pointer(p) (p)
@@ -84,6 +84,7 @@ struct mtk_eth {
     void *prog,*dma_dev;
 };
 static int live_arrays,live_dma,live_packets,live_pools,live_maps;
+static dma_addr_t dma_base;
 static unsigned expected_descriptor_bytes;
 static int fail_array,fail_pool,fail_dma,fail_packet,fail_map,packet_calls,map_calls,mmio;
 static int mtk_max_frag_size(struct mtk_eth *e,int n){return 2048;}
@@ -104,11 +105,12 @@ static void *netdev_alloc_frag(int n){return packet();}
 static void *mtk_max_buf_alloc(int n,int flags){return packet();}
 static void skb_free_frag(void *p){live_packets--;free(p);}
 static void *mtk_page_pool_get_buff(struct page_pool *p,dma_addr_t *a,int flags)
-{void *data=packet();*a=0x1000+packet_calls*0x1000;return data;}
+{void *data=packet();*a=dma_base+(packet_calls-1)*0x1000;return data;}
 static dma_addr_t dma_map_single(void *d,void *p,unsigned n,int dir)
-{map_calls++;if(fail_map==map_calls)return 0;live_maps++;return 0x1000+map_calls*0x1000;}
-static bool dma_mapping_error(void *d,dma_addr_t a){return !a;}
-static void dma_unmap_single(void*d,u64 a,unsigned n,int dir){live_maps--;assert(live_maps>=0);}
+{map_calls++;if(fail_map==map_calls)return UINT64_MAX;live_maps++;return dma_base+(map_calls-1)*0x1000;}
+static bool dma_mapping_error(void *d,dma_addr_t a){return a==UINT64_MAX;}
+static void dma_unmap_single(void*d,u64 a,unsigned n,int dir)
+{assert(a>=dma_base && a<dma_base+4*0x1000 && (a-dma_base)%0x1000==0);live_maps--;assert(live_maps>=0);}
 static void mtk_rx_put_buff(struct mtk_rx_ring*r,void*p,bool napi){live_packets--;free(p);}
 static bool xdp_rxq_info_is_reg(struct xdpq*q){return q->registered;}
 static void xdp_rxq_info_unreg(struct xdpq*q){q->registered=false;}
@@ -122,8 +124,11 @@ int main(void)
     struct mtk_reg_map map={0};
     struct mtk_soc_data soc={.reg_map=&map,.tx={.dma_size=4,.desc_size=16},.rx={.dma_size=4,.desc_size=sizeof(struct mtk_rx_dma_v2)}};
     unsigned cases=0;
-    for(int generation=1;generation<=3;generation++)for(int pool=0;pool<2;pool++)for(int stage=0;stage<12;stage++){
+    const dma_addr_t addresses[]={0x1000,0,0x100000000ULL};
+    for(int generation=1;generation<=3;generation++)for(int pool=0;pool<2;pool++)for(int address=0;address<(generation==1?2:3);address++)for(int stage=0;stage<12;stage++){
         struct mtk_eth e={.soc=&soc,.version=generation,.prog=pool?(void*)1:NULL};
+        dma_base=addresses[address];
+        soc.caps=generation>=2?MTK_36BIT_DMA:0;
         soc.rx.desc_size=generation>=3?32:16;
         expected_descriptor_bytes=4*soc.rx.desc_size;
         fail_array=stage==1;fail_pool=stage==2;fail_dma=stage==3;
@@ -142,7 +147,7 @@ int main(void)
         assert(!e.rx_ring[0].data&&!e.rx_ring[0].dma&&!e.rx_ring[0].page_pool);
         cases++;
     }
-    printf("PASS: %u actual RX allocation/unwind cases, Netsys 1/2/3, pooled/plain DMA, every packet/map failure point and repeated cleanup\n",cases);
+    printf("PASS: %u actual RX allocation/unwind cases, Netsys 1/2/3, pooled/plain DMA, zero/4-GiB DMA addresses, every packet/map failure point and repeated cleanup\n",cases);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mtk-rx-unwind-') as tmp:
