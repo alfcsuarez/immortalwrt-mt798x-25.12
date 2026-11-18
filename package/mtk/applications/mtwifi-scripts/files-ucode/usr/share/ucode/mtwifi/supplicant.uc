@@ -6,19 +6,16 @@
  *
  * Copyright (C) 2026 nanchuci <nanchuci023@gmail.com>
  *
- * 本仓库的 wpad 只提供旧的 ctrl_iface API，既不支持 interface_add 的
- * `create` 参数，自动创建 STA 接口时也会错选 AP iftype 被 MTK 驱动拒绝。
- * 因此 STA 接口的创建交给 `iw phy <phy> interface add <ifname> type
- * station`，之后再用 `wpa_cli interface_add`（不带 create）把它挂到
- * wpa_supplicant 上。network={} 配置完全由官方 wifi.supplicant.generate()
- * 生成，本模块负责后处理、接口创建、挂载和 teardown。
- * 沿用 MTK 既有的 `wpa_cli interface_add` 方式（本仓库的 wpad
- * 只提供旧的 ubus API），并额外挂一个 scan action 脚本记录扫描状态。
+ * STA interfaces are created explicitly with iw before attaching them to the
+ * shared wpad daemon. The cfg80211 config_add/config_remove API supplies the
+ * actual daemon PID to netifd; wpa_cli is only used for status and scan actions.
+ * Network blocks are rendered by wifi.supplicant.generate().
  */
 
 import * as fs from 'fs';
 import * as supplicant from 'wifi.supplicant';
-import { log, trim, readfile, shell_quote, sleep, read_pipe, atomic_write } from 'mtwifi.common';
+import * as netifd from 'wifi.netifd';
+import { log, trim, readfile, shell_quote, sleep, read_pipe, daemon_config_write, capture_files, commit_files, rollback_files } from 'mtwifi.common';
 
 const IW = '/usr/sbin/iw';
 const WPA_CTRL_DIR = '/var/run/wpa_supplicant';
@@ -47,11 +44,6 @@ const GLOBAL_DEDUP = [
 	/^\s*wps_cred_add_sae\s*=/,
 	/^\s*ignore_old_scan_res\s*=/,
 	/^\s*pmf\s*=/,
-];
-
-/* 旧 wpad (< 2.10) 不认识的字段，保留会导致整个 network block 被丢弃 */
-const DROP_LEGACY = [
-	/^\s*rsn_overriding\s*=/,
 ];
 
 function global_cli(cmd) {
@@ -206,17 +198,8 @@ function build_global(iface_data, data) {
 	return out;
 };
 
-/*
- * 对 generate() 产生的 .conf 做后处理：
- *   1. 在顶部插入旧 wpad 路径下缺失的全局字段（GLOBAL_CONF）；
- *   2. 去掉与新全局字段重名的项（GLOBAL_DEDUP）；
- *   3. 去掉旧 wpad 不认识的字段（DROP_LEGACY）。
- */
-function fixup_conf(path, iface_data, data) {
-	if (!path || !fs.stat(path))
-		return;
-
-	let lines = split(trim(fs.readfile(path) ?? ''), '\n');
+function fixup_conf(text, iface_data, data) {
+	let lines = split(trim(text ?? ''), '\n');
 	let out = [];
 
 	/* 顶部插入全局字段：for...in 遍历数组直接拿元素值 */
@@ -226,63 +209,15 @@ function fixup_conf(path, iface_data, data) {
 	for (let line in lines) {
 		let drop = false;
 
-		/* DROP_LEGACY / GLOBAL_DEDUP 是正则数组，同样直接拿正则 */
-		for (let re in DROP_LEGACY)
+		for (let re in GLOBAL_DEDUP)
 			if (match(line, re)) { drop = true; break; }
-
-		if (!drop)
-			for (let re in GLOBAL_DEDUP)
-				if (match(line, re)) { drop = true; break; }
 
 		if (!drop)
 			push(out, line);
 	}
 
-	return atomic_write(path, join('\n', out) + '\n');
+	return join('\n', out) + '\n';
 }
-
-/*
- * 找同一个 radio 上的 AP 接口名。setup() 的 data 里包含该 radio
- * 上所有接口，非 sta 的就是 AP。
- */
-function find_ap_ifname(data) {
-	let ks = keys(data.interfaces ?? {});
-
-	for (let i = 0; i < length(ks); i++) {
-		let iface_data = data.interfaces[ks[i]];
-		let mode = iface_data?.config?.mode;
-
-		if ((mode == 'ap' || mode == 'ap-wds') && iface_data.config.ifname)
-			return iface_data.config.ifname;
-	}
-
-	return null;
-};
-
-/*
- * 等 AP 接口进入 operstate=up，最多等 tries * 0.2 秒。
- * netifd 触发 setup() 的时机几乎和 hostapd 启动同时，此时 phy 上的
- * AP BSS 还在半初始化，直接创建 STA 接口会被 MTK 驱动误处理，导致
- * AP 接口 MAC 归零、连带打坏整个 phy。
- */
-function wait_ap_ready(data, tries) {
-	let ap_ifname = find_ap_ifname(data);
-
-	if (!ap_ifname)
-		return true;
-
-	for (let i = 0; i < tries; i++) {
-		let state = trim(readfile(`/sys/class/net/${ap_ifname}/operstate`) ?? '');
-
-		if (state == 'up')
-			return true;
-
-		sleep(0.2);
-	}
-
-	log(`AP ${ap_ifname} not up after ${tries * 0.2}s`);
-	return false;
-};
 
 /*
  * 让 MTK 驱动创建 STA 内核接口。
@@ -316,8 +251,12 @@ function ensure_sta_iface(ifname, phy) {
 /* 删内核 STA 接口。仅靠 wpa_cli interface_remove 只解除管理，
  * 内核接口不会消失，`iw dev` 里会残留。 */
 function remove_sta_iface(ifname) {
-	if (!fs.stat(`/var/run/mtwifi-created-${ifname}`) || !fs.stat(`/sys/class/net/${ifname}`))
-		return;
+	if (!fs.stat(`/var/run/mtwifi-created-${ifname}`))
+		return true;
+	if (!fs.stat(`/sys/class/net/${ifname}`)) {
+		fs.unlink(`/var/run/mtwifi-created-${ifname}`);
+		return true;
+	}
 
 	/* 从任何网桥里摘掉 apcli */
 	if (fs.stat(`/sys/class/net/${ifname}/master`))
@@ -328,112 +267,149 @@ function remove_sta_iface(ifname) {
 
 	for (let i = 0; i < 30 && fs.stat(`/sys/class/net/${ifname}`); i++)
 		sleep(0.1);
-	fs.unlink(`/var/run/mtwifi-created-${ifname}`);
+	let removed = !fs.stat(`/sys/class/net/${ifname}`);
+	if (removed)
+		fs.unlink(`/var/run/mtwifi-created-${ifname}`);
+	return removed;
 };
 
-/*
- * 为 payload 里所有 sta 模式 vif 生成配置并挂到 wpa_supplicant 上。
- * 返回实际挂载的接口名列表。
- */
-export function setup(data) {
-	let active = [];
+/* Prepare all STA credentials before changing .dat or attaching any interface. */
+export function prepare(data) {
+	let entries = [];
+	let staged = capture_files(() => {
+		for (let k in sort(keys(data.interfaces ?? {}))) {
+			let vif = data.interfaces[k];
+			if (vif?.config?.mode != 'sta' || vif.config.disabled)
+				continue;
+			/* The vendor APCLI datapath handles the MTK bridge integration. */
+			let entry = supplicant.generate([], data, { ...vif, bridge: null }, true);
+			if (type(entry) != 'object')
+				return false;
+			entry.text = fixup_conf(entry.text, vif, data);
+			entry.previous = readfile(entry.config);
+			entry.vif = vif;
+			if (!daemon_config_write(entry.config, entry.text, WPA_CTRL_DIR))
+				return false;
+			push(entries, entry);
+		}
+		return length(entries) > 0;
+	});
+	return { ok: staged.result, entries, files: staged.files, data, touched: [] };
+};
 
-	if (!wait_for(`${WPA_CTRL_DIR}/global`, 30)) {
-		log('wpa_supplicant global socket not ready, skip STA interfaces');
-		return false;
+export function wait_ready() {
+	for (let i = 0; i < 50; i++) {
+		if (fs.stat(`${WPA_CTRL_DIR}/global`) && length(global.ubus.list('wpa_supplicant')))
+			return true;
+		sleep(0.1);
 	}
+	return false;
+};
 
-	/* phy 来自 wifi-device 段的 `option phy`，如 phy1 */
-	let phy = data?.config?.phy ?? data?.phy ?? null;
+function attach(entry) {
+	let reply = global.ubus.call('wpa_supplicant', 'config_add', {
+		iface: entry.iface, config: entry.config,
+		driver: 'nl80211', ctrl: WPA_CTRL_DIR,
+	});
+	if (type(reply) != 'object' || !(reply.pid > 1))
+		return false;
+	netifd.add_process('/usr/sbin/wpa_supplicant', reply.pid, true, true);
+	return true;
+};
 
-	/* 先等同 radio 的 AP 接口 up，再创建 STA 接口。
-	 * netifd 触发 setup() 时 hostapd 可能还在初始化 rai0，
-	 * 此时创建 STA 会打坏 AP。最多等 30 秒。 */
-	if (!wait_ap_ready(data, 150))
+function detach(ifname) {
+	global.ubus.call('wpa_supplicant', 'config_remove', { iface: ifname });
+	return global.ubus.error() == null;
+};
+
+function interface_state(entry) {
+	let ifname = entry.iface;
+	return { entry, created: !fs.stat(`/sys/class/net/${ifname}`),
+		mac: trim(readfile(`/sys/class/net/${ifname}/address`) ?? '') };
+};
+
+export function interrupted_plan(plan) {
+	if (!plan) return null;
+	return { committed: plan.files, touched: map(plan.entries, (entry) => ({
+		...interface_state(entry), entry: { iface: entry.iface }, detached: true,
+		mac_changed: !entry.vif.config.default_macaddr && !!entry.vif.config.macaddr,
+	})) };
+};
+
+export function activate(plan) {
+	if (!plan.ok || !wait_for(`${WPA_CTRL_DIR}/global`, 30))
+		return false;
+	if (!commit_files(plan))
 		return false;
 
-	for (let k in sort(keys(data.interfaces ?? {}))) {
-		let iface_data = data.interfaces[k];
-
-		if (iface_data?.config?.mode != 'sta')
-			continue;
-
-		let ifname = iface_data.config.ifname;
-
-		if (!ifname) {
-			log(`skip sta ${iface_data.name}: no ifname`);
-			continue;
-		}
-
-		let config_list = [];
-
-		/*
-		 * 官方 wifi.supplicant.generate() 对「sta + 桥接」会直接
-		 * netifd.setup_failed('BRIDGE_NOT_ALLOWED') 并返回 1：这条限制是给
-		 * mac80211/wpad 的（wpad 自己在关联后做 STA 侧桥接）。MTK 的 apcli 由
-		 * netifd 的通用机制入桥，而且 PG 7.3 的 mWDS-STA 示例本身就是
-		 * `option mode 'sta'` + `option network 'lan'`，所以这里临时摘掉 bridge
-		 * 再生成配置。返回的 config 我们只取 conf 文件路径（entry.config），
-		 * bridge / 4addr 字段不使用。
-		 */
-		let gen_iface = {};
-
-		for (let gk, gv in iface_data)
-			gen_iface[gk] = gv;
-
-		gen_iface.bridge = null;
-
-		let entry = supplicant.generate(config_list, data, gen_iface);
-
-		if (type(entry) != 'object') {
-			log(`failed to generate supplicant config for ${ifname}`);
-			continue;
-		}
-
-		/* 补全局字段 + 兼容旧 wpad 过滤（原逻辑的扩展） */
-		if (!fixup_conf(entry.config, iface_data, data))
-			return false;
-
-		/* 先让驱动把 STA 内核接口创建出来（wpad 自己不会创建） */
+	let phy = plan.data.phy;
+	for (let entry in plan.entries) {
+		let ifname = entry.iface;
+		let state = interface_state(entry);
+		state.was_attached = index(iface_list(), ifname) >= 0;
+		push(plan.touched, state);
 		if (!ensure_sta_iface(ifname, phy))
-			continue;
+			return false;
 
-		/*
-		 * 旧 wpad 没有 ubus 的 macaddr 参数，如果 UCI 里显式配了 macaddr
-		 * 且不是 default_macaddr，需要在 attach 之前手动设置接口地址。
-		 */
-		let cfg = iface_data.config;
+		if (state.was_attached && !detach(ifname))
+			return false;
+		state.detached = true;
+		let cfg = entry.vif.config;
 		if (!cfg.default_macaddr && cfg.macaddr) {
-			system(`ip link set ${shell_quote(ifname)} down 2>/dev/null`);
-			system(`ip link set ${shell_quote(ifname)} address ${shell_quote(cfg.macaddr)} 2>/dev/null`);
+			if (system(`ip link set ${shell_quote(ifname)} down`) ||
+			    system(`ip link set ${shell_quote(ifname)} address ${shell_quote(cfg.macaddr)}`))
+				return false;
+			state.mac_changed = true;
 		}
-
-		if (index(iface_list(), ifname) >= 0) {
-			log(`interface ${ifname} already in supplicant, removing first`);
-			global_cli(`interface_remove ${shell_quote(ifname)}`);
-			sleep(1);
-		}
-
-		/* 不带 create：本 wpad 不支持；driver 传空串走默认 driver */
-		let ret = global_cli(
-			`interface_add ${shell_quote(ifname)} ${shell_quote(entry.config)} ` +
-			`'' '' '' ''`
-		);
-
-		log(`interface_add ${ifname}: ${ret}`);
-
-		if (ret != 'OK') {
+		if (!attach(entry)) {
 			log(`interface_add ${ifname} failed`);
-			remove_sta_iface(ifname);
 			return false;
 		}
-
-		system(`ip link set ${shell_quote(ifname)} up`);
+		if (system(`ip link set ${shell_quote(ifname)} up`))
+			return false;
 		scan_action_start(ifname);
-		push(active, ifname);
 	}
+	return true;
+};
 
-	return length(active) > 0;
+export function stop(plan) {
+	let ok = true;
+	for (let state in reverse(plan?.touched ?? [])) {
+		let ifname = state.entry.iface;
+		scan_action_stop(ifname);
+		if (state.detached && index(iface_list(), ifname) >= 0 && !detach(ifname)) {
+			ok = false;
+			continue;
+		}
+		if (state.created)
+			ok = remove_sta_iface(ifname) && ok;
+		else if (state.mac_changed && length(state.mac)) {
+			ok = !system(`ip link set ${shell_quote(ifname)} down`) && ok;
+			ok = !system(`ip link set ${shell_quote(ifname)} address ${shell_quote(state.mac)}`) && ok;
+		}
+	}
+	return ok;
+};
+
+export function rollback(plan, restart) {
+	if (!plan)
+		return true;
+	if (!rollback_files(plan))
+		return false;
+	let ok = true;
+	for (let state in plan.touched) {
+		let entry = state.entry;
+		if (restart == false || !state.detached || !state.was_attached)
+			continue;
+		if (entry.previous == null || !attach(entry)) {
+			ok = false;
+			continue;
+		}
+		ok = !system(`ip link set ${shell_quote(entry.iface)} up`) && ok;
+		scan_action_start(entry.iface);
+	}
+	plan.touched = [];
+	return ok;
 };
 
 /*
@@ -441,7 +417,7 @@ export function setup(data) {
  */
 export function teardown(apcli_prefix) {
 	if (!apcli_prefix)
-		return;
+		return true;
 
 	/* 合并 wpa_supplicant 已知的 + 内核里存在的 apcli 接口 */
 	let targets = {};
@@ -463,21 +439,24 @@ export function teardown(apcli_prefix) {
 		targets[ifname] = true;
 	}
 
+	let ok = true;
 	/* 遍历 object 的键，ucode 里 for...in 对 object 给键名 */
 	for (let ifname in targets) {
 		log(`teardown: cleaning ${ifname}`);
 
 		scan_action_stop(ifname);
 
-		if (index(iface_list(), ifname) >= 0)
-			global_cli(`interface_remove ${shell_quote(ifname)}`);
+		if ((index(iface_list(), ifname) >= 0 && !detach(ifname)) ||
+		    !remove_sta_iface(ifname)) {
+			ok = false;
+			continue;
+		}
 
-		remove_sta_iface(ifname);
-
-		fs.unlink(`${WPA_CTRL_DIR}/wpa-supplicant-${ifname}.conf`);
+		fs.unlink(`/var/run/wpa-supplicant-${ifname}.conf`);
 		fs.unlink(`/var/run/scan_state-${ifname}`);
 		fs.unlink(`${WPA_CTRL_DIR}/wpa_supplicant-${ifname}.conf`);
 	}
+	return ok;
 };
 
 export { iface_cli, global_cli, iface_list };

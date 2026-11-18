@@ -120,7 +120,6 @@ function iface_add(phy, config, phy_status)
 {
 	let config_inline = iface_gen_config(config, !!phy_status);
 
-	let bss = config.bss[0];
 	let ret = hostapd.add_iface(`bss_config=${phy}:${config_inline}`);
 	if (ret < 0)
 		return false;
@@ -129,12 +128,12 @@ function iface_add(phy, config, phy_status)
 		return true;
 
 	let iface = hostapd.interfaces[phy];
-	if (!iface)
-		return false;
-
-	let freq_info = iface_freq_info(iface, config, phy_status);
-
-	return iface.start(freq_info) >= 0;
+	let freq_info = iface && iface_freq_info(iface, config, phy_status);
+	if (freq_info && iface.start(freq_info))
+		return true;
+	for (let bss in reverse([...config.bss]))
+		hostapd.remove_iface(bss.ifname);
+	return false;
 }
 
 function iface_config_macaddr_list(config)
@@ -828,6 +827,16 @@ function bss_config(bss_name) {
 }
 
 let main_obj = {
+	get_radio_status: {
+		args: { iface: "" },
+		call: ex_wrap(function(req) {
+			if (!req.args.iface)
+				return libubus.STATUS_INVALID_ARGUMENT;
+
+			let iface = hostapd.interfaces?.[req.args.iface];
+			return iface ? iface.radio_status() : libubus.STATUS_NOT_FOUND;
+		})
+	},
 	reload: {
 		args: {
 			phy: "",
@@ -970,14 +979,20 @@ let main_obj = {
 	},
 	config_remove: {
 		args: {
-			iface: ""
+			iface: "",
+			report: false,
 		},
 		call: ex_wrap(function(req) {
 			if (!req.args.iface)
 				return libubus.STATUS_INVALID_ARGUMENT;
 
-			hostapd.remove_iface(req.args.iface);
-			return 0;
+			let removed = !!hostapd.bss?.[req.args.iface];
+			if (removed) {
+				hostapd.remove_iface(req.args.iface);
+				if (hostapd.bss?.[req.args.iface])
+					return libubus.STATUS_UNKNOWN_ERROR;
+			}
+			return req.args.report ? { removed } : 0;
 		})
 	},
 	bss_info: {

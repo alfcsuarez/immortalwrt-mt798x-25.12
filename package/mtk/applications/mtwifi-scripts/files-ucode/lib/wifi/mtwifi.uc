@@ -13,23 +13,15 @@
  *
  *     ucode /lib/wifi/mtwifi.uc | uci -q batch
  *
- * 命名与官方 wifi-scripts/lib/wifi/mac80211.uc 保持一致：
- *   - wifi-device 段为 radio0/radio1/...
- *   - 每个段带 type=mtwifi、phy=、band=、channel=、htmode=、country=
- *   - 额外写入 MTK 私有的 devname=（L1 profile 里的 INDEX_mainidx[_subidx]）
- *
- * 同时按官方 wifi-detect.uc 的风格补全 /etc/board.json 的 wlan 条目
- * （只补缺失的，不覆盖已存在的；官方 wifi-detect.uc 每次 wifi config
- * 都会重写 wlan.phy* 条目，所以这里写的只是兜底）。
- *
- * 已存在的 wifi-device 段（不论段名是不是 radioN，只要 type=mtwifi 且
- * 指向同一个 devname）不会被改动，重复执行是幂等的。
+ * 板级能力由通用 wifi-detect.uc 探测，本脚本只补全 UCI 设备元数据。
+ * 新设备用 L1 名称，已存在的段保留名称和接口引用。
  */
 
 import * as fs from 'fs';
 import * as uci from 'uci';
 import * as l1dat from 'mtwifi.l1dat';
 import { trim, log, shell_quote } from 'mtwifi.common';
+import { normalize_legacy_device } from 'mtwifi.validate';
 
 const BOARD_FILE = '/etc/board.json';
 const L1_DAT_PATH = l1dat.L1_DAT_PATH;
@@ -81,42 +73,19 @@ function phy_path(phy) {
 };
 
 function band_of(dev) {
-	if (dev.band != null && length(trim(dev.band)))
-		return lc(trim(dev.band));
-
-	let base = dev.main_ifname ?? dev.ext_ifname ?? '';
-	if (substr(base, 0, 3) == 'rax') return '6g';
-	if (substr(base, 0, 3) == 'rai') return '5g';
-	if (substr(base, 0, 2) == 'ra')  return '2g';
-
-	return (dev.subidx ?? 1) == 1 ? '2g' : '5g';
+	return l1dat.device_band(dev);
 };
 
-/*
- * 生成 ifname 后缀递增：ra0 + 0 → ra0；ra0 + 1 → ra1。
- * PDF 没有规定多 BSS 的命名，但物理名必须唯一且由 L1 根名派生。
- */
 function existing_devices(config) {
 	let by_devname = {};
-	let names = {};
 
 	for (let name, section in config) {
-		if (section['.type'] != 'wifi-device')
+		if (section['.type'] != 'wifi-device' || section.type != 'mtwifi')
 			continue;
-
-		names[name] = true;
-
-		/*
-		 * 新配置用 devname 选项；旧配置（段名就是 devname）通过
-		 * “段名出现在 L1 profile 里”来识别。
-		 */
-		if (section.devname)
-			by_devname[section.devname] = name;
-		else if (section.type == 'mtwifi')
-			by_devname[name] = name;
+		by_devname[section.devname || name] = name;
 	}
 
-	return { by_devname, names };
+	return by_devname;
 };
 
 function main() {
@@ -138,12 +107,16 @@ function main() {
 		if (!dev)
 			continue;
 		let phy = phy_of_ifname(dev.main_ifname);
-		let name = existing.by_devname[devname];
+		let name = existing[devname];
 		if (name) {
-			/* Upgrade metadata only. SSID, keys, encryption, channel and width stay intact. */
+			let normalized = { ...config[name] };
+			normalize_legacy_device(normalized, dev);
+			for (let key in [ 'band', 'htmode', 'channel' ])
+				if (normalized[key] != null && normalized[key] != config[name][key])
+					set(name, key, normalized[key]);
 			if (!config[name].devname)
 				set(name, 'devname', devname);
-			if (phy && !config[name].phy)
+			if (phy && (!config[name].phy || config[name].phy == dev.main_ifname))
 				set(name, 'phy', phy);
 			let path = phy ? phy_path(phy) : null;
 			if (path && !config[name].path)
@@ -154,9 +127,12 @@ function main() {
 			log(`no cfg80211 phy for ${devname}; deferring detection`);
 			continue;
 		}
-		while (config[`radio${idx}`] || config[`default_radio${idx}`])
-			idx++;
-		name = `radio${idx}`;
+		name = devname;
+		if (config[name] || config[`default_${name}`]) {
+			while (config[`radio${idx}`] || config[`default_radio${idx}`])
+				idx++;
+			name = `radio${idx++}`;
+		}
 		let iface = `default_${name}`;
 		let band = band_of(dev);
 		let defaults = BAND_DEFAULTS[band];
@@ -165,7 +141,7 @@ function main() {
 		let path = phy_path(phy);
 		push(out, `set wireless.${name}=wifi-device`);
 		for (let key, value in { type: 'mtwifi', devname, phy, band,
-			channel: defaults.channel, htmode: defaults.htmode,
+			channel: defaults.channel, htmode: defaults.htmode, noscan: defaults.noscan,
 			dbdc_main: (dev.subidx ?? 1) == 1 ? '1' : '0',
 			disabled: '1' })
 			set(name, key, value);
@@ -181,7 +157,6 @@ function main() {
 			set(iface, key, value);
 		config[name] = {};
 		config[iface] = {};
-		idx++;
 	}
 	if (length(out)) {
 		push(out, 'commit wireless');

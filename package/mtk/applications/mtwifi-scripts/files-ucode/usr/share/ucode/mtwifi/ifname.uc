@@ -76,7 +76,13 @@ export function assign(payload, dev) {
 			apcli_idx++;
 		}
 
-		if (!valid_ifname(ifname) || used[ifname]) {
+		/* Driver-owned VAPs must stay inside this radio's L1 namespace. */
+		let prefix = mode == 'sta' ? dev.apcli_ifname : dev.ext_ifname;
+		let slot = prefix && substr(ifname, 0, length(prefix)) == prefix ?
+			substr(ifname, length(prefix)) : '';
+		if (!valid_ifname(ifname) || used[ifname] ||
+		    !match(slot, /^[0-9]+$/) || slot != '' + int(slot) ||
+		    +slot > (mode == 'sta' ? MAX_APCLI_IDX : MAX_AP_IDX)) {
 			log(`invalid or duplicate ifname for vif ${v.name}`);
 			die('INVALID_IFNAME');
 		}
@@ -169,7 +175,7 @@ export function remove_wps_map(dev, path) {
 /* 当前 vif 列表里是否有某个 mode */
 export function has_mode(payload, mode) {
 	for (let k in iface_keys(payload))
-		if (payload.interfaces[k]?.config?.mode == mode)
+		if (payload.interfaces[k]?.config?.mode == mode && !payload.interfaces[k].config.disabled)
 			return true;
 
 	return false;

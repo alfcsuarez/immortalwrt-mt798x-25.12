@@ -504,6 +504,36 @@ uc_hostapd_disable_iface(struct hostapd_iface *iface)
 }
 
 static uc_value_t *
+uc_hostapd_iface_radio_status(uc_vm_t *vm, size_t nargs)
+{
+	struct hostapd_iface *iface = uc_fn_thisval("hostapd.iface");
+	uc_value_t *status, *bsses;
+	size_t i;
+
+	if (!iface)
+		return NULL;
+
+	status = ucv_object_new(vm);
+	ucv_object_add(status, "status", ucv_string_new(hostapd_state_text(iface->state)));
+	ucv_object_add(status, "freq", ucv_int64_new(iface->freq));
+	ucv_object_add(status, "channel", ucv_int64_new(iface->conf->channel));
+	ucv_object_add(status, "cac_active", ucv_boolean_new(iface->cac_started));
+	ucv_object_add(status, "cac_seconds", ucv_int64_new(iface->dfs_cac_ms / 1000));
+	bsses = ucv_object_new(vm);
+	for (i = 0; iface->bss && i < iface->num_bss; i++) {
+		struct hostapd_data *hapd = iface->bss[i];
+		uc_value_t *entry = ucv_object_new(vm);
+
+		ucv_object_add(entry, "beacon_ready", ucv_boolean_new(hapd->started && hapd->beacon_set_done));
+		ucv_object_add(entry, "disabled", ucv_boolean_new(hapd->conf->start_disabled));
+		ucv_object_add(bsses, hapd->conf->iface, entry);
+	}
+	ucv_object_add(status, "bss", bsses);
+
+	return status;
+}
+
+static uc_value_t *
 uc_hostapd_iface_stop(uc_vm_t *vm, size_t nargs)
 {
 	struct hostapd_iface *iface = uc_fn_thisval("hostapd.iface");
@@ -535,9 +565,10 @@ uc_hostapd_iface_start(uc_vm_t *vm, size_t nargs)
 	uint64_t intval;
 	int i;
 
-	if (!iface)
+	if (!iface || !iface->conf)
 		return NULL;
 
+	conf = iface->conf;
 	if (!info) {
 		iface->freq = 0;
 		goto out;
@@ -555,33 +586,43 @@ uc_hostapd_iface_start(uc_vm_t *vm, size_t nargs)
 		}								\
 	} while(0)
 
-	conf = iface->conf;
 	UPDATE_VAL(op_class, "op_class");
 	UPDATE_VAL(hw_mode, "hw_mode");
 	UPDATE_VAL(channel, "channel");
 	UPDATE_VAL(secondary_channel, "sec_channel");
-	if (!changed &&
-	    (iface->bss[0]->beacon_set_done ||
-	     iface->state == HAPD_IFACE_DFS))
-		return ucv_boolean_new(true);
 
 	intval = ucv_int64_get(ucv_object_get(info, "center_seg0_idx", NULL));
-	if (!errno)
+	if (!errno && intval != hostapd_get_oper_centr_freq_seg0_idx(conf)) {
 		hostapd_set_oper_centr_freq_seg0_idx(conf, intval);
+		changed = true;
+	}
 
 	intval = ucv_int64_get(ucv_object_get(info, "center_seg1_idx", NULL));
-	if (!errno)
+	if (!errno && intval != hostapd_get_oper_centr_freq_seg1_idx(conf)) {
 		hostapd_set_oper_centr_freq_seg1_idx(conf, intval);
+		changed = true;
+	}
 
 	intval = ucv_int64_get(ucv_object_get(info, "oper_chwidth", NULL));
-	if (!errno)
+	if (!errno && intval != hostapd_get_oper_chwidth(conf)) {
 		hostapd_set_oper_chwidth(conf, intval);
+		changed = true;
+	}
 
 	intval = ucv_int64_get(ucv_object_get(info, "frequency", NULL));
-	if (!errno)
+	if (!errno && intval != iface->freq) {
 		iface->freq = intval;
-	else
-		iface->freq = 0;
+		changed = true;
+	}
+	if (!changed) {
+		if (iface->state == HAPD_IFACE_DFS)
+			return ucv_boolean_new(true);
+		for (i = 0; i < iface->num_bss; i++)
+			if (!iface->bss[i]->beacon_set_done || iface->bss[i]->disabled)
+				break;
+		if (iface->state == HAPD_IFACE_ENABLED && i == iface->num_bss)
+			return ucv_boolean_new(true);
+	}
 	conf->acs = 0;
 
 out:
@@ -600,17 +641,15 @@ out:
 	if (conf->channel && !iface->freq)
 		iface->freq = hostapd_hw_get_freq(iface->bss[0], conf->channel);
 
-	if (iface->state != HAPD_IFACE_ENABLED) {
-		hostapd_enable_iface(iface);
-		return ucv_boolean_new(true);
-	}
+	if (iface->state != HAPD_IFACE_ENABLED)
+		return ucv_boolean_new(hostapd_enable_iface(iface) == 0);
 
 	for (i = 0; i < iface->num_bss; i++) {
 		struct hostapd_data *hapd = iface->bss[i];
 		int ret;
 
 		hapd->conf->start_disabled = 0;
-		hostapd_set_freq(hapd, conf->hw_mode, iface->freq,
+		ret = hostapd_set_freq(hapd, conf->hw_mode, iface->freq,
 				 conf->channel,
 				 conf->enable_edmg,
 				 conf->edmg_channel,
@@ -623,7 +662,10 @@ out:
 				 hostapd_get_oper_centr_freq_seg0_idx(conf),
 				 hostapd_get_oper_centr_freq_seg1_idx(conf));
 
-		ieee802_11_set_beacon(hapd);
+		if (ret || ieee802_11_set_beacon(hapd)) {
+			uc_hostapd_disable_iface(iface);
+			return ucv_boolean_new(false);
+		}
 	}
 	hostapd_owe_update_trans(iface);
 
@@ -848,6 +890,7 @@ int hostapd_ucode_init(struct hapd_interfaces *ifaces)
 	static const uc_function_list_t iface_fns[] = {
 		{ "set_bss_order", uc_hostapd_iface_set_bss_order },
 		{ "add_bss", uc_hostapd_iface_add_bss },
+		{ "radio_status", uc_hostapd_iface_radio_status },
 		{ "stop", uc_hostapd_iface_stop },
 		{ "start", uc_hostapd_iface_start },
 		{ "switch_channel", uc_hostapd_iface_switch_channel },

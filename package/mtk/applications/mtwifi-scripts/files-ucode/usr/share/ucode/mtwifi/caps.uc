@@ -43,6 +43,7 @@ export function device_capabilities(config) {
 		he_mac_cap: [],
 		eht_phy_cap: [],
 		features: {
+			ap_vlan: false,
 			ftm_responder: false,
 			radar_background: false,
 			cipher_gcmp256: false,
@@ -61,6 +62,12 @@ export function device_capabilities(config) {
 
 	if (!info)
 		return caps;
+	caps.features.ap_vlan = !!info.supported_iftypes?.ap_vlan;
+	for (let available in info.wiphy_bands ?? [])
+		if (length(available?.freqs)) {
+			caps.have_frequencies = true;
+			break;
+		}
 
 	let band = wiphy_band(info, config.band);
 
@@ -99,6 +106,28 @@ export function he_phy_cap(caps, byte, mask) {
 
 export function he_mac_cap(caps, byte, mask) {
 	return ((caps?.he_mac_cap?.[byte] ?? 0) & mask) != 0;
+};
+
+export function validate_capabilities(data) {
+	let caps = device_capabilities(data.config);
+	if (caps.have_frequencies && !length(caps.band?.freqs))
+		die('PHY_PROFILE_MISMATCH');
+	let needs_vlan = false;
+	let split = data.config.htmode in [ 'VHT80_80', 'HE80_80' ];
+	for (let _, iface in data.interfaces ?? {}) {
+		let c = iface.config;
+		needs_vlan ||= +c.dynamic_vlan > 0 || !!c.per_sta_vif ||
+			length(keys(iface.vlans ?? {})) > 0 ||
+			(c.macfilter == 'allow' && length(filter(c.maclist ?? [], (row) => index(row, ' ') >= 0)) > 0);
+		for (let _, sta in iface.stas ?? {})
+			needs_vlan ||= +sta.config?.vid > 0;
+	}
+	if (needs_vlan && !caps.features.ap_vlan)
+		die('AP_VLAN_NOT_SUPPORTED');
+	if (split && ((data.config.band == '5g' && (caps.vht_capa & 0xc) != 8) ||
+	    (data.config.htmode == 'HE80_80' && !(caps.he_phy_cap[0] & 0x10))))
+		die('80P80_NOT_SUPPORTED');
+	return caps;
 };
 
 export { WLAN_CIPHER_SUITE_GCMP_256 };

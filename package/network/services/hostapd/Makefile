@@ -5,13 +5,16 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=hostapd
-PKG_RELEASE:=3
+PKG_RELEASE:=12
 
 PKG_SOURCE_URL:=http://w1.fi/hostap.git
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_DATE:=2022-07-29
 PKG_SOURCE_VERSION:=b704dc72ef824dfdd96674b90179b274d1d38105
+PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_SOURCE_DATE)-$(call version_abbrev,$(PKG_SOURCE_VERSION))
+PKG_SOURCE:=$(PKG_SOURCE_SUBDIR).tar.xz
 PKG_MIRROR_HASH:=6c9dd359ef5a4595b6576e07928566d6864957c4af6466d641d6c3f7717f4689
+TAR_OPTIONS= -xf - --strip-components=1 -C $(PKG_BUILD_DIR)
 
 PKG_MAINTAINER:=Felix Fietkau <nbd@nbd.name>
 PKG_LICENSE:=BSD-3-Clause
@@ -21,6 +24,7 @@ PKG_BUILD_PARALLEL:=1
 PKG_ASLR_PIE_REGULAR:=1
 
 PKG_CONFIG_DEPENDS:= \
+	CONFIG_MTK_WIFI7_CFG80211_SUPPORT \
 	CONFIG_PACKAGE_kmod-ath9k \
 	CONFIG_PACKAGE_kmod-cfg80211 \
 	CONFIG_PACKAGE_hostapd \
@@ -46,6 +50,7 @@ HOSTAPD_PROVIDERS:=
 # its matching hostapd stack at build time, with a separate configure stamp.
 HOSTAPD_FILES:=./files
 ifneq ($(filter y m,$(CONFIG_PACKAGE_mtwifi-scripts)),)
+  PKG_BUILD_DIR=$(BUILD_DIR)/$(if $(BUILD_VARIANT),$(PKG_NAME)-$(BUILD_VARIANT)/)$(PKG_NAME)-$(PKG_VERSION)-cfg80211
   PATCH_DIR:=./patches-cfg80211
   HOSTAPD_FILES:=./files-cfg80211
 endif
@@ -121,10 +126,13 @@ DRIVER_MAKEOPTS= \
 	CONFIG_DRIVER_WEXT=$(CONFIG_DRIVER_WEXT_SUPPORT) \
 	CONFIG_MBO=$(CONFIG_WPA_MBO_SUPPORT)
 
-CORE_DEPENDS:=+libubus
+CORE_DEPENDS:=+libubus \
+	+PACKAGE_mtwifi-scripts:ucode +PACKAGE_mtwifi-scripts:libucode \
+	+PACKAGE_mtwifi-scripts:libblobmsg-json +PACKAGE_mtwifi-scripts:libudebug \
+	+PACKAGE_mtwifi-scripts:ucode-mod-fs +PACKAGE_mtwifi-scripts:ucode-mod-ubus \
+	+PACKAGE_mtwifi-scripts:ucode-mod-uloop +PACKAGE_mtwifi-scripts:ucode-mod-nl80211 \
+	+PACKAGE_mtwifi-scripts:ucode-mod-rtnl
 ifneq ($(filter y m,$(CONFIG_PACKAGE_mtwifi-scripts)),)
-  CORE_DEPENDS+=+ucode +libucode +libblobmsg-json +libudebug \
-	+ucode-mod-fs +ucode-mod-ubus +ucode-mod-uloop +ucode-mod-nl80211 +ucode-mod-rtnl
   DRIVER_MAKEOPTS+=CONFIG_UCODE=y CONFIG_HE_OVERRIDES=y CONFIG_EHT_OVERRIDES=y
   TARGET_LDFLAGS+=-lblobmsg_json -lucode -ludebug
 

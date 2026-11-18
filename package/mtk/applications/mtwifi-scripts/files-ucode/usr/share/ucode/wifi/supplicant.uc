@@ -57,8 +57,9 @@ export function ratelist(rates) {
 	return join(",", map(rates, (rate) => ratestr(rate)));
 };
 
-function sta_global_mtk_options(config) {
-	append_vars(config, [ 'rsn_overriding' ]);
+function sta_global_mtk_options(config, radio) {
+	if (radio.rsn_overriding != null)
+		append_raw('rsn_overriding=' + (+radio.rsn_overriding ? 1 : 0));
 	append_raw('wps_cred_add_sae=1');
 
 	if (config.auth_type in [ 'sae', 'psk-sae', 'psk-sae-compat' ])
@@ -82,11 +83,11 @@ function setup_sta(data, config) {
 		config.ieee80211w = 2;
 	else if (config.auth_type in [ 'psk-sae', 'eap-eap2' ] && !config.ieee80211w)
 		config.ieee80211w = 1;
-	if ((wildcard(data.htmode, 'EHT*') || wildcard(data.htmode, 'HE*')) &&
-		config.rsn_override)
-		config.rsn_overriding = 1;
-	else
-		config.rsn_overriding = 0;
+	if (config.rsn_overriding != null)
+		config.rsn_overriding = +config.rsn_overriding ? 1 : 0;
+	else if (config.rsn_override != null)
+		config.rsn_overriding = (wildcard(data.htmode, 'EHT*') || wildcard(data.htmode, 'HE*')) &&
+			+config.rsn_override ? 1 : 0;
 
 	set_default(config, 'ieee80211r', 0);
 	set_default(config, 'sae_pwe', 2);
@@ -291,7 +292,7 @@ function wiphy_frequencies(phy, band, radio) {
 }
 
 
-export function generate(config_list, data, interface) {
+export function generate(config_list, data, interface, render_only) {
 	flush_network();
 
 	if (interface.bridge &&
@@ -301,7 +302,7 @@ export function generate(config_list, data, interface) {
 		return 1;
 	}
 
-	interface.config.country = data.config.country_code;
+	interface.config.country = data.config.country_code ?? data.config.country;
 	interface.config.beacon_int = data.config.beacon_int;
 	if (!data.config.scan_list)
 		data.config.scan_list = wiphy_frequencies(data.phy, data.config.band, data.config.radio);
@@ -312,18 +313,17 @@ export function generate(config_list, data, interface) {
 	append_vars(interface.config, [ 'country', 'beacon_int', 'freq_list' ]);
 
 	setup_sta(data.config, interface.config);
-	sta_global_mtk_options(interface.config);
+	sta_global_mtk_options(interface.config, data.config);
 
 	let file_name = `/var/run/wpa-supplicant-${interface.config.ifname}.conf`;
-	if (fs.stat(file_name))
-		fs.rename(file_name, file_name + '.prev');
-	dump_network(file_name);
+	let text = dump_network(render_only ? null : file_name);
 
 	let config = {
 		mode: interface.config.mode,
 		ctrl: '/var/run/wpa_supplicant',
 		iface: interface.config.ifname,
 		config: file_name,
+		text,
 		'4addr': !!interface.config.wds,
 		mlo: !!interface.config.mlo,
 		freq_list: data.config.scan_list,

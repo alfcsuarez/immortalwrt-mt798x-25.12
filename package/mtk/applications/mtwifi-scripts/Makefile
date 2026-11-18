@@ -12,10 +12,16 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=mtwifi-scripts
 PKG_LICENSE:=GPL-2.0+
 PKG_VERSION:=2.0
-PKG_RELEASE:=3
+PKG_RELEASE:=19
 
 PKG_MAINTAINER:=ChuCi Nan <nanchuci023@gmail.com>
-PKG_CONFIG_DEPENDS:=CONFIG_WIFI_SCRIPTS_UCODE
+PKG_CONFIG_DEPENDS:=CONFIG_WIFI_SCRIPTS_UCODE CONFIG_WIFI_SCRIPTS_WPS_BUTTON_DISABLED \
+	CONFIG_MTK_WIFI7_OSAL_SUPPORT CONFIG_MTK_WIFI_OSAL_CFG80211_SUPPORT \
+	CONFIG_MTK_WIFI7_CFG80211_SUPPORT CONFIG_MTK_WIFI7_IWCOMMAND_CFG80211_SUPPORT \
+	CONFIG_MTK_WIFI7_CFG80211_FULL_OPS_SUPPORT CONFIG_MTK_WIFI7_HOSTAPD_MBSS_SUPPORT
+PKG_FILE_DEPENDS:=../mtwifi-cfg/files/mtwifi-cfg/mtwifi_mlo \
+	../mtwifi-cfg/files/mtwifi-cfg/mtwifi_defs.lua \
+	../mtwifi-cfg/files/mtwifi-cfg/mtwifi-mlo-recover
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -24,10 +30,13 @@ define Package/mtwifi-scripts
   CATEGORY:=MTK Properties
   SUBMENU:=Applications
   TITLE:=mtwifi configure scripts for mt799x (ucode)
-  DEPENDS:=+wifi-dats +netifd +iwinfo +iw +mwctl +hostapd-utils +wpa-cli +wpad-openssl \
-	+ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus \
+  DEPENDS:=+wifi-dats +netifd +iwinfo +iw +mwctl +hostapd-utils +wpa-cli wpad-openssl +@WIFI_SCRIPTS_UCODE \
+	+ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus +ucode-mod-uloop \
 	+ucode-mod-nl80211 +ucode-mod-rtnl +ucode-mod-digest \
-	@MTK_WIFI7_CFG80211_SUPPORT @MTK_WIFI_OSAL_CFG80211_SUPPORT
+	+lua-cjson +libuci-lua +luci-lib-nixio \
+	@MTK_WIFI7_CFG80211_SUPPORT @MTK_WIFI7_IWCOMMAND_CFG80211_SUPPORT \
+	@MTK_WIFI7_CFG80211_FULL_OPS_SUPPORT @MTK_WIFI7_HOSTAPD_MBSS_SUPPORT \
+	@(!MTK_WIFI7_OSAL_SUPPORT||MTK_WIFI_OSAL_CFG80211_SUPPORT)
   CONFLICTS:=wifi-scripts mtwifi-cfg
   PKGARCH:=all
 endef
@@ -49,6 +58,10 @@ define Build/Configure
 endef
 
 define Build/Compile
+	$(foreach option,WIFI_SCRIPTS_UCODE MTK_WIFI7_CFG80211_SUPPORT \
+		MTK_WIFI7_IWCOMMAND_CFG80211_SUPPORT MTK_WIFI7_CFG80211_FULL_OPS_SUPPORT \
+		MTK_WIFI7_HOSTAPD_MBSS_SUPPORT,\
+		$(if $(filter y,$(CONFIG_$(option))),,$(error mtwifi-scripts requires $(option)=y)))
 endef
 
 define Package/mtwifi-scripts/install
@@ -56,6 +69,12 @@ define Package/mtwifi-scripts/install
 	$(CP) ./files/* $(1)/
 	$(CP) ./files-ucode/* $(1)/
 	$(LN) l1util $(1)/sbin/l1dat
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/usr/lib/lua $(1)/etc/init.d $(1)/lib/upgrade/keep.d
+	$(INSTALL_BIN) ../mtwifi-cfg/files/mtwifi-cfg/mtwifi_mlo $(1)/usr/sbin/mtwifi-mlo-status
+	$(LN) mtwifi-mlo-status $(1)/usr/sbin/mtwifi-mlo-control
+	$(INSTALL_DATA) ../mtwifi-cfg/files/mtwifi-cfg/mtwifi_defs.lua $(1)/usr/lib/lua/
+	$(INSTALL_BIN) ../mtwifi-cfg/files/mtwifi-cfg/mtwifi-mlo-recover $(1)/etc/init.d/mtwifi-mlo-recover
+	echo /etc/mtwifi-cfg/mlo-groups.json > $(1)/lib/upgrade/keep.d/mtwifi-mlo
 ifeq ($(CONFIG_WIFI_SCRIPTS_WPS_BUTTON_DISABLED),y)
 	rm -f $(1)/etc/rc.button/wps
 endif

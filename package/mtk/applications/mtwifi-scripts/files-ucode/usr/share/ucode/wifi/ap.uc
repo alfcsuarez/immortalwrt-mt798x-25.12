@@ -7,6 +7,12 @@ import * as fs from 'fs';
 import { append, append_raw, append_value, append_vars, append_string_vars, comment, push_config, set_default, touch_file } from 'wifi.common';
 import * as netifd from 'wifi.netifd';
 import * as iface from 'wifi.iface';
+import { daemon_config_write } from 'mtwifi.common';
+
+function write_ap_file(path, text) {
+	if (!daemon_config_write(path, text, '/var/run/hostapd'))
+		die(`Failed to write ${path}`);
+}
 
 function iface_setup(config) {
 	switch(config.fixup) {
@@ -231,8 +237,10 @@ function iface_wps(config) {
 		config.eap_server = 1;
 		set_default(config, 'wps_state', 2);
 
-		if (config.ext_registrar && config.network_bridge)
+		if (config.ext_registrar && config.network_bridge) {
 			set_default(config, 'upnp_iface', config.network_bridge);
+			append('wps_cred_processing', 1);
+		}
 
 		if (config.multi_ap && config.multi_ap_backhaul_ssid) {
 			append_string_vars(config, [ 'multi_ap_backhaul_ssid' ]);
@@ -291,32 +299,24 @@ function iface_macfilter(config) {
 		return;
 	}
 
-	let file = fs.open(path, 'w');
-	if (!file) {
-		warn(`Failed to open ${path}`);
-		return;
-	}
-
-	if (config.maclist)
-		file.write(join('\n', config.maclist));
-
+	let text = length(config.maclist) ? join('\n', config.maclist) + '\n' : '';
 	let macfile = fs.readfile(config.macfile);
 	if (macfile)
-		file.write(macfile);
-	file.close();
+		text += macfile;
+	write_ap_file(path, text);
 }
 
 function iface_vlan(interface, config, vlans) {
 	let path = `/var/run/hostapd-${config.ifname}.vlan`;
 
-	let file = fs.open(path, 'w');
+	let text = '';
 	for (let k, vlan in vlans)
 		if (vlan.config.name && vlan.config.vid) {
 			let ifname = `${config.ifname}-${vlan.config.name}`;
-			file.write(`${vlan.config.vid} ${ifname}\n`);
+			text += `${vlan.config.vid} ${ifname}\n`;
 			netifd.set_vlan(interface, ifname, k);
 		}
-	file.close();
+	write_ap_file(path, text);
 
 	set_default(config, 'vlan_file', path);
 	append_vars(config, [ 'vlan_file' ]);
@@ -335,17 +335,17 @@ function iface_vlan(interface, config, vlans) {
 function iface_wpa_stations(config, stas) {
 	let path = `/var/run/hostapd-${config.ifname}.psk`;
 
-	let file = fs.open(path, 'w');
+	let text = '';
 	for (let k, sta in stas)
 		if (sta.config.mac && sta.config.key) {
 			for (let mac in sta.config.mac) {
 				let station = `${mac} ${sta.config.key}\n`;
 				if (sta.config.vid)
 					station = `vlanid=${sta.config.vid} ` + station;
-				file.write(station);
+				text += station;
 			}
 		}
-	file.close();
+	write_ap_file(path, text);
 
 	set_default(config, 'wpa_psk_file', path);
 }
@@ -353,7 +353,7 @@ function iface_wpa_stations(config, stas) {
 function iface_sae_stations(config, stas) {
 	let path = `/var/run/hostapd-${config.ifname}.sae`;
 
-	let file = fs.open(path, 'w');
+	let text = '';
 	for (let k, sta in stas)
 		if (sta.config.mac && sta.config.key) {
 			for (let mac in sta.config.mac) {
@@ -364,10 +364,10 @@ function iface_sae_stations(config, stas) {
 				if (sta.config.vid)
 					station = station + `|vlanid=${sta.config.vid}`;
 				station = station + '\n';
-				file.write(station);
+				text += station;
 			}
 		}
-	file.close();
+	write_ap_file(path, text);
 
 	set_default(config, 'sae_password_file', path);
 }

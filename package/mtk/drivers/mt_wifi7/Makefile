@@ -7,7 +7,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=mt_wifi7
-PKG_RELEASE:=15
+PKG_RELEASE:=28
 P4REV:=
 PKG_VERSION:=24.10.20261104
 PKG_SOURCE_URL:=https://raw.githubusercontent.com/MedyMa/immortalwrt-mt798x-25.12/main/dl
@@ -379,7 +379,7 @@ NOSTDINC_FLAGS += \
         -include backport/backport.h
 endif
 
-ifeq ($(CONFIG_PACKAGE_kmod-mt_wifi_cmn),y)
+ifneq ($(filter y m,$(CONFIG_PACKAGE_kmod-mt_wifi_cmn)),)
 NOSTDINC_FLAGS += \
 	-DMT_WIFI_COMMON_SUPPORT
 endif
@@ -399,11 +399,14 @@ define Build/Compile
 	$(if $(and $(CONFIG_MTK_WIFI7_OSAL_SUPPORT),$(filter y,$(CONFIG_PACKAGE_kmod-mt_wifi_cmn))),\
 		$(error WiFi7 OSAL and mt_wifi_cmn providers cannot be built together))
 	$(if $(CONFIG_MTK_WIFI7_CFG80211_SUPPORT),\
-		$(if $(filter 1,$(words $(BACKPORT_VERSION))),true,\
-			$(error WiFi7 requires one matching mac80211 backport version; found $(BACKPORT_VERSION))))
+		[ "$(words $(BACKPORT_VERSION))" -eq 1 ] || { \
+			echo "WiFi7 requires one matching mac80211 backport version; found $(BACKPORT_VERSION)" >&2; exit 1; })
 	$(if $(and $(CONFIG_MTK_WIFI7_OSAL_SUPPORT),$(CONFIG_MTK_WIFI7_CFG80211_SUPPORT)),\
 		$(if $(CONFIG_MTK_WIFI_OSAL_CFG80211_SUPPORT),true,\
 			$(error WiFi7 cfg80211 requires cfg80211 support in its OSAL provider)))
+	$(if $(and $(CONFIG_MTK_WIFI7_OSAL_SUPPORT),$(CONFIG_MTK_WIFI_OSAL_CFG80211_SUPPORT)),\
+		$(if $(CONFIG_MTK_WIFI7_CFG80211_SUPPORT),true,\
+			$(error WiFi7 WEXT requires WEXT mode in its OSAL provider)))
 	$(MAKE) $(PKG_JOBS) -C "$(LINUX_DIR)" V=1 \
 		$(KERNEL_MAKE_FLAGS) \
 		M="$(PKG_BUILD_DIR)/mt_wifi_ap" \

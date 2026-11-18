@@ -3,7 +3,7 @@
 import * as libubus from 'ubus';
 import * as nl80211 from 'nl80211';
 import * as fs from 'fs';
-import { atomic_write } from 'mtwifi.common';
+import { atomic_write, daemon_config_write, config_file_exists } from 'mtwifi.common';
 
 global.ubus = libubus.connect();
 
@@ -13,7 +13,13 @@ let network_data = '';
 const nl80211_bands = [ '2g', '5g', '60g', '6g' ];
 
 export function wiphy_info(phy) {
-	let idx = +fs.readfile(`/sys/class/ieee80211/${phy}/index`);
+	let index = trim(fs.readfile(`/sys/class/ieee80211/${phy}/index`) ?? '');
+	let digits = match(index, /^[0-9]+$/);
+	if (!digits || digits[0] != index)
+		return null;
+	let idx = +index;
+	if (idx > 0x7fffffff)
+		return null;
 
 	return nl80211.request(nl80211.const.NL80211_CMD_GET_WIPHY, nl80211.const.NLM_F_DUMP, {
 		wiphy: idx,
@@ -129,11 +135,10 @@ export function push_config(dict, key, option, value) {
 };
 
 export function touch_file(filename) {
-	let file = fs.open(filename, "a");
-	if (file)
-		file.close();
-	else
-		log('Failed to touch ' + filename);
+	if (config_file_exists(filename))
+		return;
+	if (!daemon_config_write(filename, '', '/var/run/hostapd'))
+		die('Failed to create ' + filename);
 };
 
 export function append_value(config, key, value) {

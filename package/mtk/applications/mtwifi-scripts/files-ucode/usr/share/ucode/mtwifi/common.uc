@@ -11,6 +11,8 @@
 
 import * as fs from 'fs';
 
+let pending_files;
+
 const LOG_FILE = '/tmp/mtwifi.log';
 
 /*
@@ -61,6 +63,13 @@ export function exists(path) {
 	return fs.stat(path) != null;
 };
 
+export function config_file_exists(path) {
+	for (let file in pending_files ?? [])
+		if (file.path == path)
+			return true;
+	return exists(path);
+};
+
 export function readfile(path) {
 	try {
 		return fs.readfile(path);
@@ -108,10 +117,10 @@ export function read_pipe(cmd) {
 	return txt;
 };
 
-/* 与 mtwifi_utils.sleep 等价的毫秒级 sleep（ucode 无 sleep 原语） */
+/* MTK callers use seconds; the ucode core sleep() takes milliseconds. */
 export function sleep(sec) {
 	if (sec > 0)
-		fs.poll([], int(sec * 1000));
+		global.sleep(int(sec * 1000));
 };
 
 /* 与 mtwifi_utils.log2file 等价 */
@@ -144,7 +153,7 @@ export function dirname(path) {
 };
 
 /* Same-filesystem rename: never truncate the live profile or expose credentials. */
-export function atomic_write(path, text) {
+export function atomic_write(path, text, owner) {
 	let dir = fs.mkdtemp(path + '.XXXXXX');
 	if (!dir)
 		return false;
@@ -155,11 +164,88 @@ export function atomic_write(path, text) {
 		ok = file.write(text) == length(text) && file.flush();
 		file.close();
 	}
+	if (ok && owner != null)
+		ok = fs.chown(tmp, owner.uid, owner.gid);
 	if (ok)
 		ok = fs.rename(tmp, path);
 	fs.unlink(tmp);
 	fs.rmdir(dir);
 	return !!ok;
+};
+
+/* wpad may run as network under ujail; keep credentials private to that owner. */
+export function daemon_config_write(path, text, control_dir) {
+	let owner = fs.stat(control_dir ?? fs.dirname(path));
+	if (owner == null)
+		return false;
+	if (pending_files != null) {
+		for (let file in pending_files)
+			if (file.path == path) {
+				file.text = text;
+				return true;
+			}
+		let previous = readfile(path);
+		let previous_owner = fs.stat(path);
+		if (previous_owner != null && previous == null)
+			return false;
+		push(pending_files, { path, text, owner, previous, previous_owner });
+		return true;
+	}
+	return atomic_write(path, text, owner);
+};
+
+/* Render daemon configuration without modifying any live credential file. */
+export function capture_files(render) {
+	if (pending_files != null)
+		die('NESTED_CONFIG_TRANSACTION');
+	pending_files = [];
+	try {
+		let result = render();
+		let files = pending_files;
+		pending_files = null;
+		return { result, files };
+	} catch (e) {
+		pending_files = null;
+		die(e);
+	}
+};
+
+export function rollback_files(plan) {
+	let ok = true;
+	for (let file in reverse(plan?.committed ?? [])) {
+		if (file.text != null) {
+			let current = readfile(file.path);
+			if (current == file.previous) {
+				let owner = fs.stat(file.path);
+				if (!owner || !file.previous_owner ||
+				    owner.uid == file.previous_owner.uid && owner.gid == file.previous_owner.gid)
+					continue;
+			} else if (current != file.text) {
+				log(`configuration changed during activation: ${file.path}`);
+				ok = false;
+				continue;
+			}
+		}
+		if (file.previous != null)
+			ok = atomic_write(file.path, file.previous, file.previous_owner) && ok;
+		else if (fs.stat(file.path))
+			ok = !!fs.unlink(file.path) && ok;
+	}
+	if (ok)
+		plan.committed = [];
+	return ok;
+};
+
+export function commit_files(plan) {
+	plan.committed = [];
+	for (let file in plan.files) {
+		if (!atomic_write(file.path, file.text, file.owner)) {
+			rollback_files(plan);
+			return false;
+		}
+		push(plan.committed, file);
+	}
+	return true;
 };
 
 export function valid_ifname(name) {

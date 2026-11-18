@@ -12,9 +12,7 @@
  * netifd/wireless/mac80211.sh 的 mac80211_hostapd_setup_base），
  * 并按 MTK 驱动的既有行为做了三处调整：
  *
- *   1. 频道为 auto 时写 hw_mode=any（MTK hostapd 有
- *      WPA_DRIVER_FLAGS_SUPPORT_HW_MODE_ANY 补丁），而非官方 ucode 的
- *      hw_mode=g/a + channel=0；
+ *   1. 自动信道在已选频段内使用驱动的 ACS 结果；
  *   2. 6G EHT320 使用 MTK hostapd 的 eht_oper_chwidth=9 +
  *      eht_bw320_offset 约定（官方 ucode 用 7）；
  *   3. BSS 段复用官方 wifi.ap.generate()，但为每个 BSS 注入
@@ -25,13 +23,15 @@
  */
 
 import * as fs from 'fs';
+import * as ubus from 'ubus';
 import {
 	append, append_raw, append_vars, comment, dump_config, flush_config, set_default
 } from 'wifi.common';
 import * as ap from 'wifi.ap';
 import * as netifd from 'wifi.netifd';
 import { device_capabilities } from 'mtwifi.caps';
-import { log, trim, readfile, atomic_write, exists, shell_quote, sleep } from 'mtwifi.common';
+import { center320, segments80 } from 'mtwifi.validate';
+import { log, trim, readfile, daemon_config_write, capture_files, commit_files, rollback_files, exists, shell_quote, sleep } from 'mtwifi.common';
 
 const HOSTAPD = '/usr/sbin/hostapd';
 const HOSTAPD_CLI = '/usr/sbin/hostapd_cli';
@@ -263,26 +263,18 @@ function device_rates(config) {
 
 /* MTK：6G EHT320 的 center/width 约定与官方 ucode 不同 */
 function device_eht320(config) {
-	let eht_center_seg0_map = [ [ 61, 31 ], [ 125, 95 ], [ 189, 159 ], [ 221, 191 ] ];
-	let idx = 0;
-
-	for (let k, pair in eht_center_seg0_map)
-		if (config.channel <= pair[0]) {
-			idx = pair[1];
-			break;
-		}
-
-	/* 与 shell 版一致：EHT320-1 不能用于 193 以上，EHT320-2 不能用于 29 以下 */
-	if ((config.htmode == 'EHT320-1' && config.channel >= 193) ||
-	    (config.htmode == 'EHT320-2' && config.channel <= 29))
-		return false;
-
-	if (config.htmode == 'EHT320-2' && config.channel <= 189) {
-		if (config.channel > idx)
-			idx += 32;
-		else
-			idx -= 32;
+	let layout = +(match(config.htmode, /^EHT320-([12])$/)?.[1] ?? 0);
+	if (!config.channel) {
+		config.op_class = 137;
+		config.vht_oper_chwidth = 2;
+		config.eht_oper_chwidth = 9;
+		config.eht_oper_centr_freq_seg0_idx = 0;
+		config.eht_bw320_offset = layout;
+		return true;
 	}
+	let idx = center320(config.channel, layout);
+	if (idx == null)
+		return false;
 
 	config.vht_oper_chwidth = 2;
 	config.vht_oper_centr_freq_seg0_idx = (config.channel > idx) ? idx + 16 : idx - 16;
@@ -290,21 +282,14 @@ function device_eht320(config) {
 	config.eht_oper_centr_freq_seg0_idx = idx;
 	config.op_class = 137;
 
-	switch (config.htmode) {
-	case 'EHT320-1':
-	case 'EHT320-2':
-		config.eht_bw320_offset = 1;
-		break;
-	case 'EHT320':
-		config.eht_bw320_offset = 0;
-		break;
-	}
-
+	config.eht_bw320_offset = layout;
 	return true;
 };
 
 function device_htmode_append(config, caps) {
 	let htmode = config.htmode ?? 'NOHT';
+	let extension = match(htmode, /^(HT|VHT|HE|EHT)40([+-])$/);
+	if (extension) htmode = extension[1] + '40';
 
 	config.channel_offset = (config.band == '6g') ? 1 : 0;
 
@@ -315,24 +300,18 @@ function device_htmode_append(config, caps) {
 			config.ieee80211n = 1;
 			config.ht_capab = '';
 		}
-		if (htmode in [ 'HT40', 'HT40+', 'HT40-', 'VHT40', 'VHT80', 'VHT160',
-				'HE40', 'HE80', 'HE160', 'EHT40', 'EHT80', 'EHT160' ]) {
+		if (htmode in [ 'HT40', 'VHT40', 'VHT80', 'VHT80_80', 'VHT160',
+				'HE40', 'HE80', 'HE80_80', 'HE160', 'EHT40', 'EHT80', 'EHT160' ]) {
 			config.ieee80211n = 1;
-			if (!config.channel) {
+			if (extension) {
+				config.ht_capab = '[HT40' + extension[2] + ']';
+			} else if (!config.channel) {
 				config.ht_capab = '[HT40+]';
 			} else if (config.hw_mode == 'a') {
 				config.ht_capab = ((int(config.channel / 4) + config.channel_offset) % 2)
 					? '[HT40+]' : '[HT40-]';
 			} else {
-				switch (htmode) {
-				case 'HT40+':
-				case 'HT40-':
-					config.ht_capab = '[' + htmode + ']';
-					break;
-				default:
-					config.ht_capab = (config.channel < 7) ? '[HT40+]' : '[HT40-]';
-					break;
-				}
+				config.ht_capab = (config.channel < 7) ? '[HT40+]' : '[HT40-]';
 			}
 		}
 
@@ -375,6 +354,7 @@ function device_htmode_append(config, caps) {
 	config.ieee80211ac = 1;
 	config.vht_oper_centr_freq_seg0_idx = 0;
 	config.vht_oper_chwidth = 0;
+	config.vht_oper_centr_freq_seg1_idx = 0;
 
 	switch (htmode) {
 	case 'VHT20':
@@ -386,7 +366,8 @@ function device_htmode_append(config, caps) {
 	case 'HE40':
 	case 'EHT40':
 		config.vht_oper_centr_freq_seg0_idx =
-			config.channel + (((int(config.channel / 4) + config.channel_offset) % 2) ? 2 : -2);
+			config.channel + (extension ? (extension[2] == '+' ? 2 : -2) :
+				(((int(config.channel / 4) + config.channel_offset) % 2) ? 2 : -2));
 		break;
 
 	case 'VHT80':
@@ -415,11 +396,21 @@ function device_htmode_append(config, caps) {
 			}
 		config.vht_oper_chwidth = 2;
 		break;
+	case 'VHT80_80':
+	case 'HE80_80':
+		let centers = segments80(config);
+		config.vht_oper_centr_freq_seg0_idx = centers[0];
+		config.vht_oper_centr_freq_seg1_idx = centers[1];
+		config.vht_oper_chwidth = 3;
+		break;
 
 	default:
 		config.ieee80211ac = 0;
 		break;
 	}
+
+	if (!config.channel)
+		config.vht_oper_centr_freq_seg0_idx = 0;
 
 	/* 256-QAM */
 	if (config.vendor_vht)
@@ -451,6 +442,9 @@ function device_htmode_append(config, caps) {
 			case 'EHT80':
 			case 'EHT160':
 				config.op_class = 132 + config.eht_oper_chwidth;
+				break;
+			case 'HE80_80':
+				config.op_class = 135;
 				break;
 			}
 
@@ -536,7 +530,8 @@ function device_htmode_append(config, caps) {
 			config.vht_capab += '[VHT-LINK-ADAPT-2]';
 
 		append_vars(config, [
-			'ieee80211ac', 'vht_oper_chwidth', 'vht_oper_centr_freq_seg0_idx', 'vht_capab'
+			'ieee80211ac', 'vht_oper_chwidth', 'vht_oper_centr_freq_seg0_idx',
+			'vht_oper_centr_freq_seg1_idx', 'vht_capab'
 		]);
 	}
 
@@ -549,6 +544,7 @@ function device_htmode_append(config, caps) {
 		if (config.hw_mode == 'a') {
 			config.he_oper_chwidth ??= config.vht_oper_chwidth;
 			config.he_oper_centr_freq_seg0_idx ??= config.vht_oper_centr_freq_seg0_idx;
+			config.he_oper_centr_freq_seg1_idx ??= config.vht_oper_centr_freq_seg1_idx;
 		}
 
 		if (config.he_bss_color_enabled) {
@@ -583,7 +579,7 @@ function device_htmode_append(config, caps) {
 			config.he_ldpc = false;
 
 		append_vars(config, [
-			'ieee80211ax', 'he_oper_chwidth', 'he_oper_centr_freq_seg0_idx',
+			'ieee80211ax', 'he_oper_chwidth', 'he_oper_centr_freq_seg0_idx', 'he_oper_centr_freq_seg1_idx',
 			'he_su_beamformer', 'he_su_beamformee', 'he_mu_beamformer',
 			'he_twt_required', 'he_twt_responder', 'he_ldpc',
 			'he_default_pe_duration', 'he_rts_threshold', 'he_mu_edca_qos_info_param_count',
@@ -662,25 +658,21 @@ function generate_device(config, caps) {
 	else
 		set_default(config, 'enable_background_radar', false);
 
-	append_vars(config, [ 'acs_chan_bias', 'acs_exclude_dfs', 'enable_background_radar' ]);
+	append_vars(config, [ 'acs_chan_bias', 'acs_exclude_dfs', 'acs_exclude_6ghz_non_psc', 'enable_background_radar' ]);
 
 	/* TX power */
 	append_vars(config, [ 'min_tx_power' ]);
 
 	/* hw mode / channel */
-	if (auto_channel)
-		append('hw_mode', 'any');
-	else
-		append_vars(config, [ 'hw_mode', 'channel' ]);
+	append_vars(config, [ 'hw_mode', 'channel' ]);
 
 	append_vars(config, [ 'rts_threshold', 'chanlist' ]);
 
-	if (config.hw_mode in [ 'a', 'g' ] && config.require_mode in [ 'n', 'ac', 'ax', 'be' ]) {
+	if (config.require_mode in [ 'n', 'ac', 'ax', 'be' ]) {
 		let require_mode = { n: 'require_ht', ac: 'require_vht', ax: 'require_he', be: 'require_eht' };
 		let key = require_mode[config.require_mode];
 
-		if (key && (config.require_mode != 'be' || config.ieee80211be))
-			append(key, 1);
+		append(key, 1);
 
 		config.legacy_rates = false;
 	}
@@ -692,10 +684,6 @@ function generate_device(config, caps) {
 		if (config.mbssid)
 			append_vars(config, [ 'mbssid' ]);
 	}
-
-	/* 6G power mode */
-	if (config.band != '6g')
-		append_vars(config, [ 'reg_power_type' ]);
 
 	/* raw options */
 	for (let raw in config.hostapd_options ?? [])
@@ -721,8 +709,8 @@ function iface_auth_algs(config) {
  * 与官方 hostapd.uc:setup_interface() 相同：第一个参数是
  * data.interfaces 的内部下标（"01"…），用于 netifd.set_vlan()。
  */
-function setup_interface(interface, data, config, caps, idx) {
-	config = { ...config, fixup: null };
+function setup_interface(interface, data, vif, caps, idx) {
+	let config = { ...vif.config, fixup: null };
 	config.idx = idx;
 
 	/* MTK：BSS MAC 由驱动从 .dat 派生，hostapd 不能用配置里的 bssid */
@@ -744,17 +732,24 @@ function setup_interface(interface, data, config, caps, idx) {
 	push(bss_options, 'use_driver_iface_addr=1');
 	config.hostapd_bss_options = bss_options;
 
-	ap.generate(interface, data, config, config.vlans ?? {}, config.stas ?? {}, caps.features);
+	ap.generate(interface, { ...data, ap_start_disabled: !!config.start_disabled },
+		config, vif.vlans ?? {}, vif.stas ?? {}, caps.features);
+	return config;
 };
 
 /* ------------------------------------------------------------------ */
 /* hostapd 进程管理                                                    */
 /* ------------------------------------------------------------------ */
 
-function kill_pidfile(pidfile) {
+function stop_registrar(ifname, pidfile) {
 	let pid = trim(readfile(pidfile) ?? '');
 
-	if (length(pid)) {
+	let args = match(pid, /^[0-9]+$/) && +pid > 1 ?
+		split(readfile(`/proc/${pid}/cmdline`) ?? '', '\0') : [];
+	/* The pidfile can outlive the listener and its PID can be reused. */
+	if (args[0] == HOSTAPD_CLI && args[1] == '-i' && args[2] == ifname &&
+	    args[3] == '-a' && args[4] == WPS_ER_SCRIPT && args[5] == '-B' &&
+	    args[6] == '-P' && args[7] == pidfile) {
 		system(`kill ${+pid} 2>/dev/null`);
 		sleep(0.2);
 	}
@@ -786,23 +781,12 @@ function wps_er_start(ifnames) {
 	for (let ifname in ifnames) {
 		let ctrl = `${CTRL_DIR}/${ifname}`;
 		let pidfile = `/var/run/action-${ifname}-wps-er.pid`;
-		let i;
 
-		for (i = 0; i < 10; i++) {
-			if (fs.stat(ctrl))
-				break;
-			sleep(1);
-		}
-
-		if (i == 10) {
-			log(`ctrl socket ${ctrl} not ready, skip WPS ER for ${ifname}`);
-			continue;
-		}
-
-		kill_pidfile(pidfile);
-		system(`${HOSTAPD_CLI} -i ${shell_quote(ifname)} -a ${shell_quote(WPS_ER_SCRIPT)} -B -P ${shell_quote(pidfile)}`);
-		log(`WPS ER attached to ${ifname}`);
+		stop_registrar(ifname, pidfile);
+		if (!fs.stat(ctrl) || system(`${HOSTAPD_CLI} -i ${shell_quote(ifname)} -a ${shell_quote(WPS_ER_SCRIPT)} -B -P ${shell_quote(pidfile)}`))
+			return false;
 	}
+	return true;
 };
 
 function wps_er_stop(ifnames) {
@@ -810,96 +794,199 @@ function wps_er_stop(ifnames) {
 		let pidfile = `/var/run/action-${ifname}-wps-er.pid`;
 
 		if (fs.stat(pidfile))
-			kill_pidfile(pidfile);
+			stop_registrar(ifname, pidfile);
 	}
 };
 
-/*
- * 生成配置并启动 hostapd。
- * 返回 true 表示无需 AP（没有 ap 模式的 vif，或已经由别处处理）。
- */
-export function prepare(data) {
+/* procd starts wpad asynchronously; wait before creating daemon-owned files. */
+export function wait_ready() {
+	for (let i = 0; i < 50; i++) {
+		if (length(global.ubus.list('hostapd')))
+			return true;
+		sleep(0.1);
+	}
+	return false;
+};
+
+export function prepare(data, caps) {
 	let suffix = data.vif_phy_suffix ?? '';
 	let file = conf_path(data.phy, suffix);
 	let config = data.config;
 	config.phy = data.phy;
 	config.country_code ??= config.country;
-	let caps = device_capabilities(config);
+	caps ??= device_capabilities(config);
 	let idx = 0;
 	let ifnames = [];
-	flush_config();
-	if (!generate_device(config, caps))
-		return { ok: false };
-	for (let k in sort(keys(data.interfaces ?? {}))) {
-		let iface = data.interfaces[k];
-		if (iface?.config?.mode != 'ap' || iface.config.disabled)
-			continue;
-		if (iface.config.owe_transition)
-			die('OWE_TRANSITION_NOT_SUPPORTED');
-		iface.config.network_bridge = iface.bridge;
-		iface.config.network_ifname = iface['bridge-ifname'];
-		setup_interface(k, data, iface.config, caps, idx++);
-		push(ifnames, iface.config.ifname);
-	}
-	return { ok: true, file, text: dump_config(), ifnames,
+	let advertised = [];
+	let registrars = [];
+	let render = () => {
+		flush_config();
+		if (!generate_device(config, caps))
+			return false;
+		for (let k in sort(keys(data.interfaces ?? {}))) {
+			let iface = data.interfaces[k];
+			if (iface?.config?.mode != 'ap' || iface.config.disabled)
+				continue;
+			if (iface.config.owe_transition)
+				die('OWE_TRANSITION_NOT_SUPPORTED');
+			iface.config.network_bridge = iface.bridge;
+			iface.config.network_ifname = iface['bridge-ifname'];
+			let bss = setup_interface(k, data, iface, caps, idx++);
+			push(ifnames, bss.ifname);
+			if (!bss.start_disabled) {
+				push(advertised, bss.ifname);
+				if (bss.ext_registrar && bss.network_bridge && bss.wps_possible &&
+				    length(bss.config_methods))
+					push(registrars, bss.ifname);
+			}
+		}
+		return daemon_config_write(file, dump_config(), CTRL_DIR);
+	};
+	let staged = capture_files(() => netifd.capture_notifications(render));
+	return { ok: !!staged.result.result, file, text: dump_config(), ifnames, advertised, registrars,
+		files: staged.files, notifications: staged.result.notifications,
 		previous: readfile(file), phy: data.phy };
 };
 
 function attach(plan) {
-	let reply = global.ubus.call('hostapd', 'config_add', {
+	/* config_add can wait synchronously for first-time vendor radio initialization. */
+	let connection = ubus.connect(null, 90);
+	if (!connection) return false;
+	let reply = connection.call('hostapd', 'config_add', {
 		iface: plan.phy, config: plan.file,
 	});
+	connection.disconnect();
 	if (type(reply) != 'object' || !(reply.pid > 1))
 		return false;
 	netifd.add_process(HOSTAPD, reply.pid, true, true);
 	return true;
 };
 
-function detach(ifnames) {
-	if (length(ifnames))
-		global.ubus.call('hostapd', 'config_remove', { iface: ifnames[0] });
+function detach(ifnames, plan) {
+	/* MTK removes one BSS per call; keep the primary until its siblings are gone. */
+	for (let ifname in reverse([ ...(ifnames ?? []) ])) {
+		let args = { iface: ifname };
+		if (plan) args.report = true;
+		let reply = global.ubus.call('hostapd', 'config_remove', args);
+		if (global.ubus.error() != null)
+			return false;
+		if (plan && reply?.removed)
+			plan.previous_removed = true;
+	}
+	return true;
 };
 
 export function activate(plan) {
-	if (!plan.ok || !length(plan.ifnames))
-		return plan.ok;
-	if (!atomic_write(plan.file, plan.text))
+	if (!plan.ok || !commit_files(plan))
 		return false;
-	let old_ifnames = conf_ifnames_text(plan.previous);
-	detach(old_ifnames);
+	plan.previous_ifnames = conf_ifnames_text(plan.previous);
+	wps_er_stop(plan.previous_ifnames);
+	if (!detach(plan.previous_ifnames, plan))
+		return false;
+	if (!length(plan.ifnames))
+		return true;
+	plan.attach_attempted = true;
 	if (!attach(plan)) {
 		log(`hostapd rejected configuration for ${plan.phy}`);
-		if (plan.previous != null) {
-			atomic_write(plan.file, plan.previous);
-			if (length(old_ifnames))
-				attach(plan);
-		} else {
-			fs.unlink(plan.file);
-		}
 		return false;
 	}
 	return true;
 };
 
-export function rollback(plan) {
-	if (!plan || !length(plan.ifnames))
-		return;
-	detach(plan.ifnames);
-	if (plan.previous != null) {
-		if (atomic_write(plan.file, plan.previous) &&
-		    length(conf_ifnames_text(plan.previous)))
-			attach(plan);
-	} else {
-		fs.unlink(plan.file);
+export function radio_ready(state, ifnames, advertised) {
+	if (state?.status != 'ENABLED' || !length(ifnames) || (length(advertised) && !(state.freq > 0)))
+		return false;
+	for (let name in ifnames) {
+		let bss = state.bss?.[name];
+		if (!bss || (index(advertised, name) >= 0 ?
+		    !bss.beacon_ready || bss.disabled : !bss.disabled || bss.beacon_ready))
+			return false;
 	}
+	return true;
+};
+
+export function activation(plan, report, canceled) {
+	let connection = ubus.connect(null, 2);
+	if (!connection)
+		return 'HOSTAPD_STATUS_UNAVAILABLE';
+	let started = clock(true)[0];
+	let deadline = started + 120;
+	let last_cac = false;
+	let missing = 0;
+	let result = 'HOSTAPD_ACTIVATION_TIMEOUT';
+	while (clock(true)[0] <= deadline) {
+		if (canceled(connection)) {
+			result = 'ACTIVATION_CANCELED';
+			break;
+		}
+		let state = connection.call('hostapd', 'get_radio_status', { iface: plan.phy });
+		if (type(state) != 'object') {
+			if (connection.error(true) != ubus.STATUS_TIMEOUT && ++missing >= 5) {
+				result = 'HOSTAPD_STATUS_UNAVAILABLE';
+				break;
+			}
+		} else {
+			missing = 0;
+			let cac = state.cac_active || state.status == 'DFS';
+			if (cac && !last_cac)
+				deadline = min(started + 650,
+					clock(true)[0] + min(600, state.cac_seconds || 600) + 15);
+			last_cac = cac;
+			let phase = cac ? 'cac' : state.status == 'ACS' ? 'acs' : 'configured';
+			if (state.status == 'DISABLED') {
+				result = 'HOSTAPD_ACTIVATION_FAILED';
+				break;
+			}
+			if (radio_ready(state, plan.ifnames, plan.advertised)) {
+				report(length(plan.advertised) ? 'beaconing' : 'standby', state);
+				result = null;
+				break;
+			}
+			report(phase, state);
+		}
+		sleep(1);
+	}
+	connection.disconnect();
+	return result;
+};
+
+/* Stop new BSSs before restoring .dat, then restore every AP file before attach. */
+export function stop(plan) {
+	if (plan?.attach_attempted) {
+		wps_er_stop(plan.registrars);
+		return detach(plan.ifnames);
+	}
+	return !plan?.previous_removed || detach(plan.previous_ifnames);
+};
+
+export function rollback(plan, restart) {
+	if (!plan)
+		return true;
+	if (!rollback_files(plan))
+		return false;
+	if (restart != false && plan.previous_removed) {
+		if (!attach(plan) || !wps_er_start(plan.previous_registrars ?? []))
+			return false;
+	}
+	plan.attach_attempted = false;
+	plan.previous_removed = false;
+	return true;
+};
+
+export function complete(plan) {
+	if (!wps_er_start(plan?.registrars ?? []))
+		return false;
+	for (let n in plan?.notifications ?? [])
+		netifd.notify(n.command, n.params, n.data);
+	return true;
 };
 
 export function teardown(phy, radio) {
 	let file = conf_path(phy, suffix_of(radio));
 	let ifnames = conf_ifnames(file);
 	wps_er_stop(ifnames);
-	detach(ifnames);
 	/* Keep the last known configuration available for setup rollback. */
+	return detach(ifnames);
 };
 
 export { generate_device, iface_auth_algs, conf_ifnames };

@@ -40,6 +40,8 @@ import {
 } from 'mtwifi.common';
 import * as dat from 'mtwifi.dat';
 import * as l1dat from 'mtwifi.l1dat';
+import { device_capabilities } from 'mtwifi.caps';
+import { center320 } from 'mtwifi.validate';
 import defs from 'mtwifi.defs';
 
 const REINSTALL_LOCK = '/tmp/mtwifi_reloading.lock';
@@ -285,6 +287,13 @@ function set_dev_dat(dats, dat_key, cfg) {
 		dats[dat_key] = cfg2dat(cfg);
 };
 
+function bssid_tokens(value, count) {
+	let values = [];
+	for (let i = 0; i < count; i++)
+		push(values, cfg2dat(value));
+	return join(';', values);
+};
+
 function set_dat(dats, apidx, dat_key, cfg) {
 	if (cfg != null)
 		dats[dat_key] = dat.token_set(dats[dat_key], apidx, cfg2dat(cfg));
@@ -360,7 +369,7 @@ function __exec_cfg80211_tool(ifname, key, val) {
 
 	if (tool == null) {
 		log_syslog(`no cfg80211 tool found for ${ifname}`);
-		return;
+		die('VENDOR_TOOL_UNAVAILABLE');
 	}
 
 	if (type(val) == 'bool')
@@ -371,13 +380,10 @@ function __exec_cfg80211_tool(ifname, key, val) {
 	let cmd = `${tool} ${shell_quote(ifname)} set ${shell_quote('' + key + '=' + val)}`;
 
 	/* Do not log private wireless command arguments. */
-	system(cmd);
+	if (system(cmd) != 0)
+		die('VENDOR_OPTION_APPLY_FAILED');
 };
 
-function __apcli_auto_connect(ifname) {
-	__exec_cfg80211_tool(ifname, 'ApCliEnable', '1');
-	__exec_cfg80211_tool(ifname, 'ApCliAutoConnect', '3');
-};
 
 function mtwifi_cfg_cfg80211_tool_hook(cfg) {
 	const ap_hook = (v) => {
@@ -396,17 +402,7 @@ function mtwifi_cfg_cfg80211_tool_hook(cfg) {
 		}
 	};
 
-	const apcli_hook = (v) => {
-		if (v?.config == null || truthy(v.config.disabled) || v.config.ifname == null)
-			return;
-
-		let vif = v.config.ifname;
-
-		__apcli_auto_connect(vif);
-	};
-
 	mtwifi_cfg_foreach_vif(cfg, 'ap', ap_hook);
-	mtwifi_cfg_foreach_vif(cfg, 'sta', apcli_hook);
 };
 
 /* ============================================================
@@ -421,14 +417,24 @@ function mtwifi_cfg_cfg80211_tool_hook(cfg) {
  */
 export function driver_up(devname, payload) {
 	mtwifi_cfg_cfg80211_tool_hook(payload);
+	/* WHNAT is adapter state; updating its profile alone is insufficient
+	 * while sibling bands keep that adapter running. Use its native setter.
+	 */
+	let dev = get_dev(l1dat.load_cached(), devname);
+	let profile = dev ? dat.load_profile(dev.profile_path) : null;
+	for (let _, v in payload.interfaces ?? {}) {
+		if (v.config.disabled) continue;
+		if (profile?.WHNAT != null)
+			__exec_cfg80211_tool(v.config.ifname, 'whnat_en', profile.WHNAT);
+		break;
+	}
 	mtwifi_cfg_foreach_vif(payload, 'ap', (v) => {
-		if (!v.config.disassoc_low_ack)
-			return;
 		let ifn = shell_quote(v.config.ifname);
 		if (v.config.kicklow != null)
-			system(`/usr/sbin/mwctl dev ${ifn} set ${shell_quote('KickStaRssiLow=' + v.config.kicklow)}`);
+			__exec_cfg80211_tool(v.config.ifname, 'KickStaRssiLow', v.config.kicklow);
 		if (v.config.assocthres != null)
-			system(`/usr/sbin/mwctl dev ${ifn} set assocreq_rssi_thres ${shell_quote(v.config.assocthres)}`);
+			if (system(`/usr/sbin/mwctl dev ${ifn} set assocreq_rssi_thres ${shell_quote(v.config.assocthres)}`))
+				die('ASSOC_RSSI_APPLY_FAILED');
 	});
 };
 
@@ -444,7 +450,6 @@ function set_chip_cfg(cfg, dats, devs, dev_name, plan) {
 		return;
 
 	for (let k, v in defs.chip_cfgs) {
-		dats[v[0]] = v[1];
 		set_dev_dat(dats, v[0], cfg.config[k]);
 	}
 
@@ -505,7 +510,7 @@ function get_basic_rate(band, cell_density, legacy_rates, w_mode) {
  * ============================================================ */
 
 /* 找不到的 encryption 不要直接索引 null（原 Lua 会崩） */
-function enc2dat_lookup(enc, sae_ext_key) {
+function enc2dat_lookup(enc, sae_ext_key, gcmp256) {
 	if (enc == null)
 		return null;
 
@@ -524,7 +529,11 @@ function enc2dat_lookup(enc, sae_ext_key) {
 	 */
 	let on = ('' + sae_ext_key) in [ '1', 'true', 'on', 'yes' ];
 
-	return on ? (entry.ext ?? entry.plain) : (entry.plain ?? entry.ext);
+	let result = [ ...(on ? (entry.ext ?? entry.plain) : (entry.plain ?? entry.ext)) ];
+	/* The AKM flag and the automatic pairwise cipher are independent. */
+	if (enc in [ 'sae', 'sae-mixed' ])
+		result[1] = truthy(gcmp256) ? 'CCMP128,GCMP256' : 'CCMP128';
+	return result;
 };
 
 /*
@@ -555,6 +564,95 @@ function igmp_snooping_get() {
 	}
 };
 
+function acs_channel_set(value, band, ranges) {
+	let channels = {};
+	let text = trim(type(value) == 'array' ? join(' ', value) : (value ?? ''));
+	let max_channel = { '2g': 14, '5g': 196, '6g': 233 }[band];
+	if (!length(text))
+		return channels;
+	for (let token in split(text, /[;[:space:]]+/)) {
+		if (!length(token)) continue;
+		let span = match(token, ranges ? /^([0-9]{1,3})(-([0-9]{1,3}))?$/ : /^([0-9]{1,3})$/);
+		let first = +(span?.[1] ?? 0);
+		let last = +(span?.[3] ?? first);
+		if (!first || last < first || last > max_channel)
+			die('ACS_INVALID_CHANNEL_LIST');
+		for (let channel = first; channel <= last; channel++)
+			channels[channel] = true;
+	}
+	return channels;
+};
+
+function acs_channel_number(freq, band) {
+	if (band == '2g')
+		return freq == 2484 ? 14 : (freq - 2407) / 5;
+	if (band == '5g')
+		return (freq - (freq >= 4910 && freq <= 4980 ? 4000 : 5000)) / 5;
+	return freq == 5935 ? 2 : (freq - 5950) / 5;
+};
+
+function apply_acs_config(dats, config, default_skip, caps) {
+	let automatic = config.channel == 'auto';
+	let psc = automatic && config.band == '6g' && !!+config.psc_acs;
+	let layout = +(match(config.htmode, /^EHT320-([12])$/)?.[1] ?? 0);
+	dats.AutoChannelSelect = automatic ? config.acs_alg ?? 3 : 0;
+	dats.Channel = automatic ? 0 : config.channel;
+	dats.AutoChannelSkipList = default_skip;
+	dats.AcsPrimaryChannels = '';
+	dats.Eht320Layout = layout;
+	if (config.band == '6g')
+		dats.PSC_ACS = psc ? 1 : 0;
+	if (!automatic)
+		return;
+
+	let blocked = acs_channel_set(config.acs_skiplist, config.band, false);
+	let selected = acs_channel_set(config.chanlist, config.band, true);
+	let restricted = length(keys(selected)) > 0;
+	let skip_dfs = config.acs_exclude_dfs || (config.band == '5g' && (config.doth === false || config.dfs === false));
+	if (!restricted && !psc && !layout && !skip_dfs && !length(keys(blocked)))
+		return;
+
+	let freqs = (caps ?? device_capabilities(config)).band?.freqs;
+	if (!length(freqs))
+		die('ACS_CHANNELS_UNAVAILABLE');
+	let excluded = { ...acs_channel_set(default_skip, config.band, false), ...blocked };
+	let skip = {};
+	let candidates = [];
+	let width = match(config.htmode, /(20|40|80|160|320)/)?.[1] ?? '20';
+	let width_flag = 'no_' + width + 'mhz';
+	let he = match(config.htmode, /^(HE|EHT)/);
+	let eht = match(config.htmode, /^EHT/);
+	for (let info in freqs) {
+		if (!info?.freq)
+			continue;
+		let channel = acs_channel_number(info.freq, config.band);
+		if (channel <= 0 || channel != int(channel))
+			continue;
+		/* DFS state 1 means radar was detected. Usable DFS channels can still run CAC. */
+		if (excluded[channel] || info.disabled || info[width_flag] ||
+		    (he && info.no_he) || (eht && info.no_eht) || (info.no_ir && !info.radar) ||
+		    (info.radar && (skip_dfs || info.dfs_state == 1))) {
+			skip[channel] = true;
+			continue;
+		}
+		if (width == '40' && (info.no_ht40_plus && info.no_ht40_minus ||
+		    info.no_ht40_plus && match(config.htmode, /\+$/) ||
+		    info.no_ht40_minus && match(config.htmode, /-$/)))
+			continue;
+		if ((!restricted || selected[channel]) && (!psc || channel % 16 == 5) &&
+		    (!layout || center320(channel, layout) != null))
+			push(candidates, '' + channel);
+	}
+	if (!length(candidates))
+		die('ACS_NO_ELIGIBLE_CHANNEL');
+
+	/* The driver selects at interface open. Hostapd validates the same candidates. */
+	dats.AutoChannelSkipList = join(';', keys(skip));
+	dats.AcsPrimaryChannels = join(';', candidates);
+	config.chanlist = candidates;
+	config.acs_exclude_6ghz_non_psc = psc;
+};
+
 /* ============================================================
  * write_dat：生成/写回 .dat
  *
@@ -565,7 +663,7 @@ function igmp_snooping_get() {
  * 原 Lua 会自己执行 rmmod/modprobe 和 "/sbin/wifi up" 递归，这里只返回
  * 标志，由 handler 决定（handler 需要先知道结果再决定是否启动 hostapd）。
  * ============================================================ */
-export function prepare_dat(devname, payload) {
+export function prepare_dat(devname, payload, caps) {
 	let result = { ok: false, reinstall: false, changed: false, profiles: {}, files: [] };
 
 	if (exists(REINSTALL_LOCK)) {
@@ -623,33 +721,32 @@ export function prepare_dat(devname, payload) {
 	}
 
 	let band = payload.config.band;
-	let require_mode = payload.config.require_mode;
 	let wmode;
 
 	if (band == '2g') {
-		if (is_be_mode(payload) || require_mode == 'be')
+		if (is_be_mode(payload))
 			wmode = 22;	/* PHY_11BE_24G */
-		else if (is_ax_mode(payload) || require_mode == 'ax')
+		else if (is_ax_mode(payload))
 			wmode = 16;	/* PHY_11AX_24G */
-		else if (is_n_mode(payload) || require_mode == 'n')
+		else if (is_n_mode(payload))
 			wmode = 9;	/* PHY_11BGN_MIXED */
 		else
-			wmode = 4;	/* PHY_11G */
+			wmode = payload.config.hw_mode == '11b' ? 1 : 0;	/* B only or B/G */
 	} else if (band == '5g') {
-		if (is_be_mode(payload) || require_mode == 'be')
+		if (is_be_mode(payload))
 			wmode = 23;	/* PHY_11BE_5G */
-		else if (is_ax_mode(payload) || require_mode == 'ax')
+		else if (is_ax_mode(payload))
 			wmode = 17;	/* PHY_11AX_5G */
-		else if (is_ac_mode(payload) || require_mode == 'ac')
+		else if (is_ac_mode(payload))
 			wmode = 14;	/* PHY_11VHT_N_A_MIXED */
-		else if (is_n_mode(payload) || require_mode == 'n')
+		else if (is_n_mode(payload))
 			wmode = 8;	/* PHY_11AN_MIXED */
 		else
 			wmode = 2;	/* PHY_11A */
 	} else if (band == '6g') {
-		if (is_be_mode(payload) || require_mode == 'be')
+		if (is_be_mode(payload))
 			wmode = 24;	/* PHY_11BE_6G */
-		else if (is_ax_mode(payload) || require_mode == 'ax')
+		else if (is_ax_mode(payload))
 			wmode = 18;	/* PHY_11AX_6G */
 	}
 
@@ -658,7 +755,8 @@ export function prepare_dat(devname, payload) {
 		return result;
 	}
 
-	let bwres = match(payload.config.htmode, /([0-9]+)/);
+	let bwres = payload.config.htmode == 'NOHT' ? [ '20', '20' ] :
+		match(payload.config.htmode, /([0-9]+)/);
 
 	if (bwres == null) {
 		log('invalid bandwidth!');
@@ -666,6 +764,9 @@ export function prepare_dat(devname, payload) {
 	}
 
 	let bw = bwres[1];
+	let split_bw = payload.config.htmode in [ 'VHT80_80', 'HE80_80' ];
+	let extension = match(payload.config.htmode, /40([+-])$/);
+	if (extension) dats.HT_EXTCHA = extension[1] == '+' ? 1 : 0;
 
 	dats.HT_BW = 0;
 	dats.VHT_BW = 0;
@@ -700,6 +801,14 @@ export function prepare_dat(devname, payload) {
 			dats.EHT_ApBw = 4;
 		else if (is_ax_mode(payload))
 			dats.EHT_ApBw = 3;
+	}
+	let secondary = [];
+	for (let i = 0; i < +dats.BssidNum; i++)
+		push(secondary, split_bw ? '' + payload.config.channel2 : '0');
+	dats.VHT_Sec80_Channel = join(';', secondary);
+	if (split_bw) {
+		dats.VHT_BW = 3;
+		dats.EHT_ApBw = 0;
 	}
 
 	/* setup apcli */
@@ -765,10 +874,16 @@ export function prepare_dat(devname, payload) {
 		dats.ApCliSsid = lua_or(v.config.ssid, '');
 		dats.AutoConnect = has_text(v.config.ssid) ? 0 : 1;
 		dats.ApCliBssid = lua_or(v.config.bssid, '');
-		dats.MACRepeaterEn = has_text(v.config.bssid) ? 1 : 0;
+		dats.MACRepeaterEn = truthy(v.config.mac_repeater) ? 1 : 0;
 		dats.ApCliUAPSDCapable = lua_or(v.config.uapsd, 0);
 
-		let encinfo = enc2dat_lookup(v.config.encryption, v.config.sae_ext_key);
+		let enrolling = v.config.encryption == 'wps';
+		let encinfo = enc2dat_lookup(enrolling ? 'none' : v.config.encryption,
+			v.config.sae_ext_key, v.config.gcmp256);
+		if (enrolling) {
+			dats.AutoConnect = 0;
+			dats.ApCliSsid = '';
+		}
 
 		if (encinfo == null) {
 			log(`unknown encryption "${v.config.encryption}" on ${iface_key}, skip ApCliAuthMode`);
@@ -822,6 +937,7 @@ export function prepare_dat(devname, payload) {
 	set_chip_cfg(payload, dats, devs, dev_name, result);
 
 	let country = payload.config.country ?? payload.config.country_code;
+	let default_skip = '';
 
 	if (type(country) == 'string' && length(country) == 2) {
 		dats.CountryCode = country;
@@ -839,29 +955,21 @@ export function prepare_dat(devname, payload) {
 			dats.CountryRegionABand = region[1];
 
 			if (country == '00' || country == 'US')
-				dats.AutoChannelSkipList = '100;104;108;112;116;120;124;128;132;136;140;144;169;173;177';
-			else
-				dats.AutoChannelSkipList = '';
+				default_skip = '100;104;108;112;116;120;124;128;132;136;140;144;169;173;177';
 		} else if (band == '6g') {
 			dats.PweMethod = 2;
 			dats.CountryRegionABand = region[2];
 		}
 	}
 
-	if (payload.config.channel == 'auto') {
-		dats.AutoChannelSelect = 3;
-		dats.Channel = 0;
-	} else {
-		dats.AutoChannelSelect = 0;
-		dats.Channel = payload.config.channel;
-	}
+	apply_acs_config(dats, payload.config, default_skip, caps);
 
 	/* 原 Lua 直接比较 cfg.config.txpower < 100，txpower 是字符串时会崩 */
 	let txpower = num_or(payload.config.txpower, null);
 	if (txpower != null && txpower < 100) {
 		dats.PERCENTAGEenable = 1;
 		dats.TxPower = txpower;
-	} else {
+	} else if (txpower != null) {
 		dats.PERCENTAGEenable = 0;
 		dats.TxPower = 100;
 	}
@@ -870,24 +978,30 @@ export function prepare_dat(devname, payload) {
 		dats.ETxBfEnCond = 1;
 		dats.MUTxRxEnable = dats.ApCliEnable == 1 ? 3 : 1;
 		dats.ITxBfEn = 1;
-	} else {
+	} else if (payload.config.mu_beamformer != null) {
 		dats.ETxBfEnCond = 0;
 		dats.MUTxRxEnable = 0;
 		dats.ITxBfEn = 0;
 	}
-
-	if (truthy(payload.config.twt)) {
-		/* cfg2dat() 把 boolean 写成 1/0，字符串/数字原样透传 */
-		if (is_ax_mode(payload))
-			dats.TWTSupport = cfg2dat(payload.config.twt) ?? payload.config.twt;
-		else if (is_be_mode(payload))
-			dats.EHT_ApRestrictedTwt = cfg2dat(payload.config.twt) ?? payload.config.twt;
-	} else {
-		dats.TWTSupport = 0;
-		dats.EHT_ApRestrictedTwt = 0;
+	if (payload.config.mu_beamformer != null) {
+		payload.config.he_mu_beamformer = payload.config.mu_beamformer;
+		payload.config.eht_mu_beamformer = payload.config.mu_beamformer;
 	}
+	set_dev_dat(dats, 'ITxBfEn', payload.config.itxbfen);
+	set_dev_dat(dats, 'SREnable', payload.config.sre_enable);
+	set_dev_dat(dats, 'VOW_Airtime_Fairness_En', payload.config.vow_airtime_fairness_en);
 
-	dats.MapMode = payload.config.map_mode ?? 0;
+	/* HE individual/broadcast TWT and EHT restricted TWT are independent. */
+	if (payload.config.twt != null)
+		dats.TWTSupport = payload.config.twt;
+	if (payload.config.eht_restricted_twt != null)
+		dats.EHT_ApRestrictedTwt = bssid_tokens(payload.config.eht_restricted_twt, int(dats.BssidNum));
+	let twt = int(dat.token_get(dats.TWTSupport, 1, '0'));
+	payload.config.he_twt_responder = !!(twt & 1);
+	if (payload.config.he_ldpc != null)
+		dats.HeLdpc = bssid_tokens(payload.config.he_ldpc, int(dats.BssidNum));
+
+	set_dev_dat(dats, 'MapMode', payload.config.map_mode);
 	if (payload.config.map_mode == '1') {
 		dats.SREnable = 0;
 		dats.SRMode = 0;
@@ -904,27 +1018,24 @@ export function prepare_dat(devname, payload) {
 	else
 		dats.EDCCARegion = 0;
 
-	if (truthy(payload.config.doth)) {
-		if (band == '2g')
-			dats.SeamlessCSA = 1;
-		else
-			dats.IEEE80211H = 1;
-
-		if (truthy(payload.config.zw_dfs)) {
-			dats.DfsZeroWait = dats.MACRepeaterEn == 1 ? 0 : 1;
-			dats.DfsDedicatedZeroWait = 2;
-			dats.DfsZeroWaitDefault = 1;
-		}
-
-		dats.DfsEnable = truthy(payload.config.dfs) ? 1 : 0;
-	} else {
-		dats.SeamlessCSA = 0;
-		dats.IEEE80211H = 0;
+	if (payload.config.doth != null)
+		set_dev_dat(dats, band == '2g' ? 'SeamlessCSA' : 'IEEE80211H', payload.config.doth);
+	if (band == '5g' && payload.config.doth === false) {
 		dats.DfsEnable = 0;
 		dats.DfsZeroWait = 0;
 		dats.DfsDedicatedZeroWait = 0;
 		dats.DfsZeroWaitDefault = 0;
+	} else if (band == '5g') {
+		set_dev_dat(dats, 'DfsEnable', payload.config.dfs);
+		if (payload.config.zw_dfs != null) {
+			let enable = payload.config.zw_dfs && +dats.IEEE80211H == 1 && +dats.DfsEnable == 1;
+			dats.DfsZeroWait = enable && +dats.MACRepeaterEn != 1 ? 1 : 0;
+			dats.DfsDedicatedZeroWait = enable ? 2 : 0;
+			dats.DfsZeroWaitDefault = enable ? 1 : 0;
+		}
 	}
+	if (band == '5g')
+		payload.config.ieee80211h = +dats.IEEE80211H == 1;
 
 	/* Resolve WHNAT through L1 ownership, never through a global filename glob. */
 	for (let group in l1dat.whnat_groups(devs)) {
@@ -937,10 +1048,10 @@ export function prepare_dat(devname, payload) {
 				value = sec.whnat;
 		if (dev_name == group.master && payload.config.whnat != null)
 			value = payload.config.whnat;
-		if (value == null || value == '') value = '1';
+		if (value == null || value === '') value = '1';
 		if (!(value in [ '0', '1', 0, 1, false, true ]))
 			return result;
-		value = (value == '1' || value == 1 || value == true) ? '1' : '0';
+		value = (value === '1' || value === 1 || value === true) ? '1' : '0';
 		let paths = { ...group.profiles, [group.path]: true };
 		for (let path in paths) {
 			let cfgs = result.profiles[path] ?? dat.load_profile(path);
@@ -952,17 +1063,22 @@ export function prepare_dat(devname, payload) {
 	}
 
 	/* in mt_wifi cmm_cfg.c set_datcfg_ack_cts_timeout */
-	dats.ACK_CTS_TOUT_EN = has_text(payload.config.distance > 0) ? 1 : 0;
+	dats.ACK_CTS_TOUT_EN = payload.config.distance > 0 ? 1 : 0;
 	dats.Distance = dats.ACK_CTS_TOUT_EN == 1 ? lua_or(payload.config.distance, 0) : 0;
 	dats.BasicRate = get_basic_rate(band, payload.config.cell_density ?? 0,
 	                                truthy(payload.config.legacy_rates) ? 1 : 0, wmode);
 	dats.BGProtection = truthy(payload.config.legacy_rates) ? 1 : 0;
-	dats.Vht1024QamSupport = truthy(payload.config.vht_1024) ? 1 : 0;
-	dats.TxBurst = truthy(payload.config.tx_burst) ? 1 : 0;
-	dats.TxPreamble = truthy(payload.config.short_preamble) ? 1 : 0;
+	set_dev_dat(dats, 'Vht1024QamSupport', payload.config.vht_1024);
+	set_dev_dat(dats, 'TxBurst', payload.config.tx_burst);
+	set_dev_dat(dats, 'TxPreamble', payload.config.tx_preamble);
 
 	/* reset vif cfgs to default */
+	const preserve = [ 'HT_AMSDU', 'HT_AutoBA', 'APSDCapable',
+		'MuMimoDlEnable', 'MuMimoUlEnable', 'MuOfdmaDlEnable', 'MuOfdmaUlEnable',
+		'PpMuMimoDlEnable', 'PpMuMimoUlEnable', 'PpOfdmaDlEnable', 'PpOfdmaUlEnable' ];
 	for (let k, v in defs.vif_cfgs) {
+		if (k in preserve && dats[k] != null)
+			continue;
 		dats[k] = '';
 
 		for (let i = 1; i <= counts.ap; i++)
@@ -1008,16 +1124,14 @@ export function prepare_dat(devname, payload) {
 
 		if (v?.config?.mode != 'ap')
 			continue;
+		v.config.preamble = +dats.TxPreamble != 0;
 
 		let ifname = v.config.ifname;
 		let igmp_snooping = igmp_snooping_get();
 		let mac = v.config.macaddr;
-		let mlo = v.config.mlo;
-		let mld_group = v.config.mldgroup;
-
-		if (truthy(mlo)) {
-
-			set_dat(dats, apidx, 'MldGroup', lua_or(mld_group, mlo));
+		let mld_group = v.config.mldgroup ?? (v.config.mlo ? 1 : 0);
+		set_dat(dats, apidx, 'MldGroup', mld_group);
+		if (mld_group > 0) {
 			set_idx_dat(dats, mld_group, 'MldAddr', lua_or(mac, ''));
 		} else {
 			if (ap_index == 0)
@@ -1037,7 +1151,8 @@ export function prepare_dat(devname, payload) {
 		set_dat(dats, apidx, 'RekeyInterval', v.config.wpa_group_rekey);
 		set_dat(dats, apidx, 'HT_AMSDU', v.config.amsdu);
 		set_dat(dats, apidx, 'HT_AutoBA', v.config.autoba);
-		set_dat(dats, apidx, 'APSDCapable', lua_or(v.config.uapsd, 0));
+		set_dat(dats, apidx, 'APSDCapable', v.config.uapsd);
+		v.config.uapsd_advertisement_enabled = +dat.token_get(dats.APSDCapable, apidx, '0') == 1;
 		set_dat(dats, apidx, 'RTSThreshold', v.config.rts);
 		set_dat(dats, apidx, 'FragThreshold', v.config.frag);
 		set_dat(dats, apidx, 'DtimPeriod', v.config.dtim_period);
@@ -1085,13 +1200,14 @@ export function prepare_dat(devname, payload) {
 				if (i > defs.max_acl_entry)
 					break;
 
-				maclist = length(maclist) > 0 ? maclist + ';' + entry : entry;
+				let mac = split(entry, ' ', 2)[0];
+				maclist = length(maclist) > 0 ? maclist + ';' + mac : mac;
 			}
 
 			set_idx_dat(dats, apidx - 1, 'AccessControlList', maclist);
 		}
 
-		let encinfo = enc2dat_lookup(v.config.encryption, v.config.sae_ext_key);
+		let encinfo = enc2dat_lookup(v.config.encryption, v.config.sae_ext_key, v.config.gcmp256);
 		let authmode = encinfo != null ? encinfo[0] : null;
 
 		if (encinfo == null) {
@@ -1102,9 +1218,9 @@ export function prepare_dat(devname, payload) {
 			set_dat(dats, apidx, 'EncrypType', encinfo[1]);
 		}
 
-		let wps = tostr(v.config.wps_pushbutton);
+		let wps = +v.config.wps_pushbutton;
 
-		if (wps == '1') {
+		if (wps == 1) {
 			set_dat(dats, apidx, 'WscConfMode', 7);
 			set_dat(dats, apidx, 'WscConfStatus', 1);
 
@@ -1112,34 +1228,31 @@ export function prepare_dat(devname, payload) {
 
 			set_dat(dats, apidx, 'Wsc4digitPinCode', length('' + pin) <= 4 ? 1 : 0);
 			set_dat(dats, apidx, 'WscVendorPinCode', lua_or(v.config.pin, ''));
-		} else if (wps == '2') {
+		} else if (wps == 2) {
 			set_dat(dats, apidx, 'WscConfMode', 7);
 			set_dat(dats, apidx, 'WscConfStatus', 2);
+		} else {
+			set_dat(dats, apidx, 'WscConfMode', 0);
 		}
 
-		let ieee80211w = tostr(v.config.ieee80211w);
-		if (ieee80211w == '1' || authmode == 'WPA2PSKWPA3PSK' ||
-		    authmode == 'WPA2PSKWPA3PSK,WPA3PSK_EXT') {
-			set_dat(dats, apidx, 'PMFMFPC', 1);
-			set_dat(dats, apidx, 'PMFMFPR', 0);
-			set_dat(dats, apidx, 'PMFSHA256', 0);
-		} else if (ieee80211w == '2' || authmode == 'OWE' ||
-		           authmode == 'WPA3PSK,WPA3PSK_EXT' || authmode == 'WPA3PSK_EXT' ||
-		           authmode == 'WPA3PSK' || authmode == 'WPA3' ||
-			   authmode == 'WPA3-192' || authmode == 'WPA3PSK,WPA3PSK_EXT') {
-			set_dat(dats, apidx, 'PMFMFPC', 1);
-			set_dat(dats, apidx, 'PMFMFPR', 1);
-			set_dat(dats, apidx, 'PMFSHA256', authmode == 'WPA3' ? 1 : 0);
-		}
-
-		if (ieee80211w != '0') {
+		let pmf = v.config.ieee80211w;
+		if (authmode == 'OPEN' || authmode == 'SHARED')
+			pmf = 0;
+		else if (authmode in [ 'OWE', 'WPA3PSK,WPA3PSK_EXT', 'WPA3PSK_EXT', 'WPA3PSK', 'WPA3', 'WPA3-192' ])
+			pmf = 2;
+		else if (pmf == null && authmode in [ 'WPA2PSKWPA3PSK', 'WPA2PSKWPA3PSK,WPA3PSK_EXT', 'WPA3WPA2' ])
+			pmf = 1;
+		set_dat(dats, apidx, 'PMFMFPC', +pmf > 0 ? 1 : 0);
+		set_dat(dats, apidx, 'PMFMFPR', +pmf == 2 ? 1 : 0);
+		set_dat(dats, apidx, 'PMFSHA256', authmode == 'WPA3' ? 1 : 0);
+		set_dat(dats, apidx, 'OCVSupport', +pmf ? (v.config.ocv ?? 0) : 0);
+		if (+pmf) {
 			set_dat(dats, apidx, 'PMFSAQ_Time', v.config.ieee80211w_max_timeout);
 			set_dat(dats, apidx, 'PMFSAQ_ConfTime', v.config.ieee80211w_retry_timeout);
-			set_dat(dats, apidx, 'OCVSupport', v.config.ocv);
 		}
 
-		if (!(authmode == 'OPEN' || authmode == 'OWE'))
-			set_dat(dats, apidx, 'RekeyMethod', 'TIME');
+		if (authmode != 'OWE')
+			set_dat(dats, apidx, 'RekeyMethod', authmode in [ 'OPEN', 'SHARED' ] ? 'DISABLE' : 'TIME');
 
 		if (authmode == 'WPA' || authmode == 'WPA2' || authmode == 'WPA1WPA2' ||
 		    authmode == 'WPA3WPA2' || authmode == 'WPA3' || authmode == 'WPA3-192') {
@@ -1186,9 +1299,18 @@ export function prepare_dat(devname, payload) {
 
 export function rollback_dat(plan) {
 	let ok = true;
-	for (let file in reverse(plan.committed ?? []))
+	for (let file in reverse(plan.committed ?? [])) {
+		let current = readfile(file.path);
+		if (current == file.previous) continue;
+		if (current != file.text) {
+			log(`profile changed during activation: ${file.path}`);
+			ok = false;
+			continue;
+		}
 		ok = atomic_write(file.path, file.previous) && ok;
-	plan.committed = [];
+	}
+	if (ok)
+		plan.committed = [];
 	return ok;
 };
 
