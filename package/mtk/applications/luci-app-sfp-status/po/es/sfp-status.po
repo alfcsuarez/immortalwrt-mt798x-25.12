@@ -1,0 +1,54 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-sfp-status\n"
+"Language-Team: es\n"
+"Language: es\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "SFP"
+msgstr "SFP"
+
+msgid "Grant UCI read and RPC access to LuCI app SFP status"
+msgstr "Conceder acceso de lectura UCI y RPC a la app LuCI de estado SFP"
+
+msgid "Module"
+msgstr "Módulo"
+
+msgid "SFP Name"
+msgstr "Modelo SFP"
+
+msgid "Temperature"
+msgstr "Temperatura"
+
+msgid "SFP Speed"
+msgstr "Velocidad SFP"
+
+msgid "Voltage"
+msgstr "Voltaje"
+
+msgid "Bias Current"
+msgstr "Corriente de polarización"
+
+msgid "Available Interfaces"
+msgstr "Interfaces disponibles"
+
+msgid "SFP Interfaces"
+msgstr "Interfaces SFP"
+
+msgid "Status"
+msgstr "Estado"
+
+msgid "Unavailable"
+msgstr "No disponible"
+
+msgid "Interface"
+msgstr "Interfaz"
+
+msgid "Name"
+msgstr "Nombre"
+
+msgid "Value"
+msgstr "Valor"

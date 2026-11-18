@@ -1,0 +1,141 @@
+msgid ""
+msgstr ""
+"Language: es\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "0 stops the fan; 100 uses maximum PWM."
+msgstr "0 detiene el ventilador; 100 usa el PWM máximo."
+
+msgid "Basic settings"
+msgstr "Ajustes básicos"
+
+msgid "CPU temperature"
+msgstr "Temperatura de CPU"
+
+msgid "Control interval (seconds)"
+msgstr "Intervalo de control (segundos)"
+
+msgid "Control mode"
+msgstr "Modo de control"
+
+msgid "Device unavailable"
+msgstr "Dispositivo no disponible"
+
+msgid "Disabled"
+msgstr "Deshabilitado"
+
+msgid "Enable service"
+msgstr "Habilitar servicio"
+
+msgid "Estimated speed"
+msgstr "Velocidad estimada"
+
+msgid "Fan Control"
+msgstr "Control del ventilador"
+
+msgid "Fan control unavailable."
+msgstr "Control del ventilador no disponible."
+
+msgid "Five seconds is recommended."
+msgstr "Se recomiendan 5 segundos."
+
+msgid "Fixed PWM output"
+msgstr "Salida PWM fija"
+
+msgid "Follow temperature"
+msgstr "Según temperatura"
+
+msgid "Full-speed temperature (°C)"
+msgstr "Temperatura de velocidad máxima (°C)"
+
+msgid "Manual"
+msgstr "Manual"
+
+msgid "Manual PWM (%)"
+msgstr "PWM manual (%)"
+
+msgid "Manual and Turbo modes require a writable PWM fan interface."
+msgstr "Los modos Manual y Turbo requieren una interfaz PWM grabable."
+
+msgid "Maximum PWM output"
+msgstr "Salida PWM máxima"
+
+msgid "Maximum speed (RPM)"
+msgstr "Velocidad máxima (RPM)"
+
+msgid "Measured speed"
+msgstr "Velocidad medida"
+
+msgid "Mode unavailable"
+msgstr "Modo no disponible"
+
+msgid "No compatible fan control was detected."
+msgstr "No se detectó ningún control de ventilador compatible."
+
+msgid "PWM duty"
+msgstr "Ciclo PWM"
+
+msgid "Refresh every %s seconds"
+msgstr "Actualizar cada %s segundos"
+
+msgid "Cooling"
+msgstr "Refrigerando"
+
+msgid "Running mode"
+msgstr "Modo de funcionamiento"
+
+msgid "Service is enabled but not running."
+msgstr "El servicio está habilitado pero no en ejecución."
+
+msgid "Smart"
+msgstr "Inteligente"
+
+msgid "Speed display and estimation ceiling."
+msgstr "Límite para mostrar y estimar la velocidad."
+
+msgid "Speed unavailable"
+msgstr "Velocidad no disponible"
+
+msgid "Status unavailable"
+msgstr "Estado no disponible"
+
+msgid "Stop temperature (°C)"
+msgstr "Temperatura de parada (°C)"
+
+msgid "Stop temperature must be lower than full-speed temperature."
+msgstr "La temperatura de parada debe ser inferior a la de velocidad máxima."
+
+msgid "Stop the fan below this temperature."
+msgstr "Detener el ventilador por debajo de esta temperatura."
+
+msgid "Stopped"
+msgstr "Detenido"
+
+msgid "Turbo"
+msgstr "Turbo"
+
+msgid "Unable to read fan status. Retrying automatically."
+msgstr "No se pudo leer el estado del ventilador. Reintentando automáticamente."
+
+msgid "Unavailable"
+msgstr "No disponible"
+
+msgid "Unsupported device"
+msgstr "Dispositivo no compatible"
+
+msgid "Use maximum PWM at this temperature."
+msgstr "Usar PWM máximo al alcanzar esta temperatura."
+
+msgid "Smart curve"
+msgstr "Curva inteligente"
+
+msgid "Stop"
+msgstr "Parada"
+
+msgid "Current"
+msgstr "Actual"
+
+msgid "Full speed"
+msgstr "Máxima"

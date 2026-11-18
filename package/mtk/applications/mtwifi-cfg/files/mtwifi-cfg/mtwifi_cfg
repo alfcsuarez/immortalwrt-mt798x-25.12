@@ -1076,8 +1076,10 @@ function mtwifi_cfg_setup(argv)
                 set_dat(dats, apidx, "PMFMFPR", 1)
             end
 
-            if not (authmode == "OPEN" or authmode == "OWE") then
+            if not (authmode == "OPEN" or authmode == "OWE") and tonumber(v.config.wpa_group_rekey or 3600) ~= 0 then
                 set_dat(dats, apidx, "RekeyMethod", "TIME")
+            else
+                set_dat(dats, apidx, "RekeyMethod", "DISABLE")
             end
 
             apidx = apidx + 1

@@ -8,7 +8,7 @@
 		}
 	},
 	"admin/mtk/turboacc": {
-		"title": "网络加速",
+		"title": "Aceleración de red",
 		"action": {
 			"type": "view",
 			"path": "turboacc"

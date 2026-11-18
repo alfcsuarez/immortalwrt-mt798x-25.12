@@ -119,22 +119,22 @@ function rateWrite(section, value) { uci.set(CONFIG, section, this.option, Strin
 function rateValidate(section, value) {
 	var n = Number(value), kbit = n * 1000;
 	return /^\d+(\.\d{1,3})?$/.test(value) && Number.isFinite(n) && n >= 0 && n <= 10000 &&
-		Math.abs(kbit - Math.round(kbit)) < 0.000001 || _('范围为 0–10000 Mbit/s，最多三位小数。');
+		Math.abs(kbit - Math.round(kbit)) < 0.000001 || _('El rango es 0–10000 Mbit/s, máximo tres decimales.');
 }
 function rateText(section) {
 	var n = Number(uci.get(CONFIG, section, this.option) || 0);
-	return n > 0 ? (n / 1000) + ' Mbit/s' : _('不限速');
+	return n > 0 ? (n / 1000) + ' Mbit/s' : _('Sin límite');
 }
 function label(state) {
-	if (state.busy) return _('正在应用');
-	if (state.schema !== 1) return _('状态不可用');
-	if (state.error) return _('需要处理');
-	if (!state.enabled) return state.owned ? _('待清理') : _('未开启');
-	if (state.applied) return _('已应用');
-	return _('等待应用');
+	if (state.busy) return _('Aplicando');
+	if (state.schema !== 1) return _('Estado no disponible');
+	if (state.error) return _('Requiere atención');
+	if (!state.enabled) return state.owned ? _('Pendiente de limpiar') : _('Desactivado');
+	if (state.applied) return _('Aplicado');
+	return _('Pendiente de aplicar');
 }
 function countText(value) {
-	return Number.isFinite(value) && value >= 0 ? value.toLocaleString() : _('不可用');
+	return Number.isFinite(value) && value >= 0 ? value.toLocaleString() : _('No disponible');
 }
 function target(section) {
 	var kind = uci.get(CONFIG, section, 'selector') || 'ip';
@@ -159,51 +159,51 @@ return view.extend({
 		var service = E('strong', { 'class': 'hqos-status', 'role': 'status' });
 		var queueCount = E('strong'), ruleCount = E('strong');
 		var message = E('div', { 'class': 'hqos-error', 'role': 'status' });
-		var queues = E('div', { 'class': 'table hqos-queues', 'role': 'table', 'aria-label': _('QDMA 队列') });
+		var queues = E('div', { 'class': 'table hqos-queues', 'role': 'table', 'aria-label': _('Colas QDMA') });
 		var paths = {};
 		var header = E('div', { 'class': 'hqos-header' }, [
 			E('div', { 'class': 'hqos-identity' }, [ speedIcon(), E('div', {}, [
-				E('h2', { 'class': 'hqos-title' }, _('网速控制')), service,
-				E('p', { 'class': 'hqos-subtitle' }, _('设备与端口限速'))
+				E('h2', { 'class': 'hqos-title' }, _('Control de velocidad (HQoS)')), service,
+				E('p', { 'class': 'hqos-subtitle' }, _('Límite de velocidad por dispositivo y puerto'))
 			]) ]),
 			E('div', { 'class': 'hqos-metrics', 'style': 'grid-template-columns:repeat(2,minmax(0,1fr))' }, [
-				E('div', { 'class': 'hqos-metric' }, [ E('span', {}, _('已应用规则')), ruleCount ]),
-				E('div', { 'class': 'hqos-metric' }, [ E('span', {}, _('可见硬件队列')), queueCount ])
+				E('div', { 'class': 'hqos-metric' }, [ E('span', {}, _('Reglas aplicadas')), ruleCount ]),
+				E('div', { 'class': 'hqos-metric' }, [ E('span', {}, _('Colas hardware visibles')), queueCount ])
 			])
 		]);
 
-		s = m.section(form.NamedSection, 'global', 'hqos', _('基本设置'));
+		s = m.section(form.NamedSection, 'global', 'hqos', _('Ajustes básicos'));
 		s.anonymous = true;
-		o = s.option(form.Flag, 'enabled', _('启用限速'));
+		o = s.option(form.Flag, 'enabled', _('Habilitar control de velocidad'));
 		o.default = '0'; o.rmempty = false;
-		o = s.option(form.ListValue, 'lan', _('LAN 网络'));
+		o = s.option(form.ListValue, 'lan', _('Red LAN'));
 		o.rmempty = false;
 		interfaces.forEach(function(item) { if (item.interface !== 'loopback') o.value(item.interface, item.interface + (item.l3_device ? ' · ' + item.l3_device : '')); });
 		var configuredLan = uci.get(CONFIG, 'global', 'lan') || 'lan';
 		if (!interfaces.some(function(item) { return item.interface === configuredLan; })) o.value(configuredLan);
-		o = s.option(form.DynamicList, 'wan', _('WAN 网络'));
+		o = s.option(form.DynamicList, 'wan', _('Red WAN'));
 		o.rmempty = false; o.datatype = 'uciname';
 		interfaces.forEach(function(item) { if (item.interface !== 'loopback') o.value(item.interface); });
 		[ 'download', 'upload' ].forEach(function(key) {
-			o = s.option(form.Value, key, (key === 'download' ? _('硬件总下载') : _('硬件总上传')) + ' (Mbit/s)');
+			o = s.option(form.Value, key, (key === 'download' ? _('Bajada total hardware') : _('Subida total hardware')) + ' (Mbit/s)');
 			o.rmempty = false; o.default = '0'; o.datatype = 'and(ufloat,min(0),max(10000))'; o.validate = rateValidate;
-			o.description = _('0 表示不设置总上限；软件限速规则独立生效。');
+			o.description = _('0 significa sin límite global; las reglas por software se aplican de forma independiente.');
 		});
 
-		s = m.section(form.GridSection, 'rule', _('限速规则'));
+		s = m.section(form.GridSection, 'rule', _('Reglas de velocidad'));
 		s.anonymous = true; s.addremove = true; s.sortable = true; s.nodescriptions = true;
-		s.modaltitle = _('编辑限速规则');
-		s.description = _('自动模式优先分配硬件队列，条件或队列不足时使用软件限速。代理流量请选软件限速。');
-		o = s.option(form.Flag, 'enabled', _('启用'));
+		s.modaltitle = _('Editar regla de velocidad');
+		s.description = _('El modo automático prioriza colas hardware y usa software si faltan colas o condiciones. Para tráfico proxy, selecciona software.');
+		o = s.option(form.Flag, 'enabled', _('Habilitado'));
 		o.default = '1'; o.rmempty = false; o.editable = true;
-		o = s.option(form.Value, 'name', _('名称'));
+		o = s.option(form.Value, 'name', _('Nombre'));
 		o.datatype = 'maxlength(80)'; o.modalonly = true;
-		o = s.option(form.DummyValue, '_target', _('目标'));
+		o = s.option(form.DummyValue, '_target', _('Objetivo'));
 		o.modalonly = false;
 		o.textvalue = function(section) { return uci.get(CONFIG, section, 'name') || target(section); };
-		o = s.option(form.ListValue, 'selector', _('匹配类型'));
+		o = s.option(form.ListValue, 'selector', _('Tipo de coincidencia'));
 		o.modalonly = true; o.rmempty = false; o.default = 'ip';
-		o.value('ip', _('IPv4 地址或网段')); o.value('ip6', _('IPv6 地址或网段')); o.value('mac', _('MAC 地址')); o.value('port', _('TCP / UDP 端口'));
+		o.value('ip', _('Dirección o subred IPv4')); o.value('ip6', _('Dirección o subred IPv6')); o.value('mac', _('Dirección MAC')); o.value('port', _('Puerto TCP / UDP'));
 		o.write = function(section, value) {
 			uci.set(CONFIG, section, 'selector', value);
 			[ 'ip', 'ip6', 'mac', 'ports', 'proto', 'port_side', 'address' ].forEach(function(key) {
@@ -211,7 +211,7 @@ return view.extend({
 			});
 		};
 		[ 'ip', 'ip6', 'mac' ].forEach(function(kind) {
-			o = s.option(form.Value, kind, kind === 'mac' ? _('MAC 地址') : kind === 'ip6' ? _('IPv6 地址或网段') : _('IPv4 地址或网段'));
+			o = s.option(form.Value, kind, kind === 'mac' ? _('Dirección MAC') : kind === 'ip6' ? _('Dirección o subred IPv6') : _('Dirección o subred IPv4'));
 			o.modalonly = true; o.rmempty = false; o.depends('selector', kind);
 			o.datatype = kind === 'mac' ? 'macaddr' : kind === 'ip6' ? 'ip6addr' : 'ip4addr';
 			Object.keys(hosts).forEach(function(mac) {
@@ -219,43 +219,43 @@ return view.extend({
 				values.forEach(function(address) { o.value(address, host.name ? host.name + ' (' + address + ')' : address); });
 			});
 		});
-		o = s.option(form.ListValue, 'proto', _('协议'));
+		o = s.option(form.ListValue, 'proto', _('Protocolo'));
 		o.modalonly = true; o.depends('selector', 'port'); o.default = 'both'; o.rmempty = false;
 		o.value('both', 'TCP + UDP'); o.value('tcp', 'TCP'); o.value('udp', 'UDP');
-		o = s.option(form.Value, 'ports', _('端口'));
+		o = s.option(form.Value, 'ports', _('Puerto'));
 		o.modalonly = true; o.depends('selector', 'port'); o.rmempty = false; o.placeholder = '443,8000-8100';
 		o.validate = function(section, value) {
 			var terms = String(value || '').replace(/\s/g, '').split(',');
 			return terms.length <= 16 && terms.every(function(term) {
 				var match = /^(\d+)(?:[-:](\d+))?$/.exec(term);
 				return match && +match[1] >= 1 && +match[1] <= 65535 && (!match[2] || (+match[2] >= +match[1] && +match[2] <= 65535));
-			}) || _('请输入端口或端口段，最多 16 项。');
+			}) || _('Introduce puertos o rangos, máximo 16 elementos.');
 		};
-		o = s.option(form.ListValue, 'port_side', _('端口位置'));
+		o = s.option(form.ListValue, 'port_side', _('Lado del puerto'));
 		o.modalonly = true; o.depends('selector', 'port'); o.default = 'remote'; o.rmempty = false;
-		o.value('remote', _('远端服务端口')); o.value('local', _('本地设备端口')); o.value('any', _('任一端'));
-		o = s.option(form.Value, 'address', _('限定设备或网段'));
+		o.value('remote', _('Puerto remoto')); o.value('local', _('Puerto local')); o.value('any', _('Cualquiera'));
+		o = s.option(form.Value, 'address', _('Limitar a dispositivo o subred'));
 		o.modalonly = true; o.depends('selector', 'port'); o.datatype = 'ipaddr';
-		o.description = _('留空时匹配所选 LAN 的设备。');
-		o = s.option(form.ListValue, 'engine', _('限速方式'));
+		o.description = _('Si se deja vacío, coincide con dispositivos de la LAN seleccionada.');
+		o = s.option(form.ListValue, 'engine', _('Modo de límite'));
 		o.modalonly = true; o.rmempty = false; o.default = 'auto';
-		o.value('auto', _('自动')); o.value('hardware', _('硬件')); o.value('software', _('软件'));
-		o = s.option(form.DummyValue, '_path', _('应用路径'));
+		o.value('auto', _('Automático')); o.value('hardware', _('Hardware')); o.value('software', _('Software'));
+		o = s.option(form.DummyValue, '_path', _('Ruta aplicada'));
 		o.modalonly = false;
 		o.textvalue = function(section) {
 			var rule = paths[section];
-			var text = !rule ? _('待应用') : rule.pending_address ? _('等待设备地址') : rule.path === 'hardware' ? 'Q' + rule.up_qid + ' ↑ / Q' + rule.down_qid + ' ↓' : _('软件');
+			var text = !rule ? _('Pendiente') : rule.pending_address ? _('Esperando IP del dispositivo') : rule.path === 'hardware' ? 'Q' + rule.up_qid + ' ↑ / Q' + rule.down_qid + ' ↓' : _('Software');
 			return E('span', { 'data-hqos-rule': section }, text);
 		};
 		[ 'download', 'upload' ].forEach(function(key) {
-			o = s.option(form.Value, key, (key === 'download' ? _('下载') : _('上传')) + ' (Mbit/s)');
+			o = s.option(form.Value, key, (key === 'download' ? _('Bajada') : _('Subida')) + ' (Mbit/s)');
 			o.datatype = 'and(ufloat,min(0),max(10000))'; o.rmempty = false; o.default = '0';
 			o.cfgvalue = rateRead; o.write = rateWrite; o.validate = rateValidate; o.textvalue = rateText;
-			o.description = _('0 表示不限速。');
+			o.description = _('0 significa sin límite.');
 		});
 
 		function update(updated) {
-			if (!updated || updated.schema !== 1) updated = { schema: 0, error: _('无法获取网速控制状态') };
+			if (!updated || updated.schema !== 1) updated = { schema: 0, error: _('No se pudo obtener el estado de HQoS') };
 			if (updated.busy) { service.textContent = label(updated); return; }
 			state = updated;
 			paths = {};
@@ -267,21 +267,21 @@ return view.extend({
 			message.textContent = state.error || '';
 			message.hidden = !state.error;
 			queues.replaceChildren(E('div', { 'class': 'tr table-titles', 'role': 'row' },
-				[ _('队列'), _('方向'), _('实际上限'), _('包数'), _('丢包'), _('字节') ].map(function(text) { return E('div', { 'class': 'th', 'role': 'columnheader' }, text); })));
+				[ _('Cola'), _('Dirección'), _('Límite efectivo'), _('Paquetes'), _('Descartes'), _('Bytes') ].map(function(text) { return E('div', { 'class': 'th', 'role': 'columnheader' }, text); })));
 			list(state.queues).forEach(function(queue) {
 				queues.appendChild(E('div', { 'class': 'tr', 'role': 'row' }, [
 					E('div', { 'class': 'td' }, 'Q' + queue.id + (queue.verified ? '' : ' !')),
-					E('div', { 'class': 'td' }, queue.direction === 'up' ? _('上传') : _('下载')),
-					E('div', { 'class': 'td' }, queue.rate_kbps > 0 ? (queue.rate_kbps / 1000) + ' Mbit/s' : _('不限速')),
+					E('div', { 'class': 'td' }, queue.direction === 'up' ? _('Subida') : _('Bajada')),
+					E('div', { 'class': 'td' }, queue.rate_kbps > 0 ? (queue.rate_kbps / 1000) + ' Mbit/s' : _('Sin límite')),
 					E('div', { 'class': 'td' }, countText(queue.packets)), E('div', { 'class': 'td' }, countText(queue.drops)),
-					E('div', { 'class': 'td' }, Number.isFinite(queue.bytes) ? '%1024.2mB'.format(queue.bytes) : _('不可用'))
+					E('div', { 'class': 'td' }, Number.isFinite(queue.bytes) ? '%1024.2mB'.format(queue.bytes) : _('No disponible'))
 				]));
 			});
-			if (!list(state.queues).length) queues.appendChild(E('div', { 'class': 'tr' }, E('div', { 'class': 'td' }, _('暂无已分配的硬件队列'))));
+			if (!list(state.queues).length) queues.appendChild(E('div', { 'class': 'tr' }, E('div', { 'class': 'td' }, _('Sin colas hardware asignadas'))));
 			if (page) {
 				page.querySelectorAll('[data-hqos-rule]').forEach(function(node) {
 					var rule = paths[node.getAttribute('data-hqos-rule')];
-					node.textContent = !rule ? _('待应用') : rule.pending_address ? _('等待设备地址') : rule.path === 'hardware' ? 'Q' + rule.up_qid + ' ↑ / Q' + rule.down_qid + ' ↓' : _('软件');
+					node.textContent = !rule ? _('Pendiente') : rule.pending_address ? _('Esperando IP del dispositivo') : rule.path === 'hardware' ? 'Q' + rule.up_qid + ' ↑ / Q' + rule.down_qid + ' ↓' : _('Software');
 				});
 				var root = document.documentElement, mode = root.getAttribute('data-argon-mode');
 				var background = getComputedStyle(document.body).backgroundColor.match(/[\d.]+/g);
@@ -293,9 +293,9 @@ return view.extend({
 		poll.add(function() { return callStatus().then(update).catch(function() { update({ schema: 0 }); }); }, 5);
 		return m.render().then(function(formNode) {
 			page = E('div', { 'class': 'mtk-hqos' }, [ E('style', {}, style), header, message, formNode,
-				E('section', { 'class': 'cbi-section' }, [ E('h3', {}, _('QDMA 队列')),
+				E('section', { 'class': 'cbi-section' }, [ E('h3', {}, _('Colas QDMA')),
 					E('div', { 'class': 'hqos-queue-scroll' }, queues),
-					E('p', { 'class': 'hqos-note' }, _('计数来自驱动；缺失时显示不可用。')) ]) ]);
+					E('p', { 'class': 'hqos-note' }, _('Contadores del controlador; muestra «No disponible» si faltan.')) ]) ]);
 			update(state);
 			return page;
 		});

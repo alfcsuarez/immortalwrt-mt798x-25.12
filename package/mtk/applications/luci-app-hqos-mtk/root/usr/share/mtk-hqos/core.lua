@@ -4,9 +4,9 @@ local M = {}
 local function fail(message) error(message, 0) end
 local function integer(value, low, high, label)
 	local text = tostring(value or "0")
-	if not text:match("^%d+$") or #text > 9 then fail(label .. " 必须为整数") end
+	if not text:match("^%d+$") or #text > 9 then fail(label .. " debe ser un entero") end
 	local n = tonumber(text)
-	if n < low or n > high then fail(label .. " 超出范围") end
+	if n < low or n > high then fail(label .. " fuera de rango") end
 	return n
 end
 local function enabled(value) return value == true or value == "1" or value == "true" end
@@ -20,38 +20,38 @@ local function ipv4(value)
 	return bytes
 end
 function M.address(value, family)
-	if type(value) ~= "string" or #value > 64 or value:find("[^%x:./]") then fail("IP 地址格式错误") end
+	if type(value) ~= "string" or #value > 64 or value:find("[^%x:./]") then fail("Formato de dirección IP no válido") end
 	local address, prefix = value:match("^([^/]+)/(%d+)$")
 	address = address or value
 	local bytes
 	if family == "ip" then
 		bytes = ipv4(address)
-		if not bytes then fail("IPv4 地址格式错误") end
-		prefix = prefix and integer(prefix, 0, 32, "IPv4 前缀") or 32
+		if not bytes then fail("Formato de dirección IPv4 no válido") end
+		prefix = prefix and integer(prefix, 0, 32, "Prefijo IPv4") or 32
 	else
 		if address:find(".", 1, true) then
 			local tail = address:match("([^:]+)$")
 			local v4 = tail and ipv4(tail)
-			if not v4 then fail("IPv6 地址格式错误") end
+			if not v4 then fail("Formato de dirección IPv6 no válido") end
 			address = address:sub(1, #address - #tail) .. string.format("%x:%x", v4[1] * 256 + v4[2], v4[3] * 256 + v4[4])
 		end
-		if address:find(":::", 1, true) then fail("IPv6 地址格式错误") end
+		if address:find(":::", 1, true) then fail("Formato de dirección IPv6 no válido") end
 		local start = address:find("::", 1, true)
-		if start and address:find("::", start + 2, true) then fail("IPv6 地址格式错误") end
+		if start and address:find("::", start + 2, true) then fail("Formato de dirección IPv6 no válido") end
 		local words = {}
 		for word in address:gmatch("[^:]+") do
-			if #word > 4 or not word:match("^%x+$") then fail("IPv6 地址格式错误") end
+			if #word > 4 or not word:match("^%x+$") then fail("Formato de dirección IPv6 no válido") end
 			words[#words + 1] = tonumber(word, 16)
 		end
 		if start then
-			if #words >= 8 then fail("IPv6 地址格式错误") end
+			if #words >= 8 then fail("Formato de dirección IPv6 no válido") end
 			local before = 0
 			for _ in address:sub(1, start - 1):gmatch("[^:]+") do before = before + 1 end
 			while #words < 8 do table.insert(words, before + 1, 0) end
-		elseif #words ~= 8 or address:sub(1, 1) == ":" or address:sub(-1) == ":" then fail("IPv6 地址格式错误") end
+		elseif #words ~= 8 or address:sub(1, 1) == ":" or address:sub(-1) == ":" then fail("Formato de dirección IPv6 no válido") end
 		bytes = {}
 		for _, word in ipairs(words) do bytes[#bytes + 1] = math.floor(word / 256); bytes[#bytes + 1] = word % 256 end
-		prefix = prefix and integer(prefix, 0, 128, "IPv6 前缀") or 128
+		prefix = prefix and integer(prefix, 0, 128, "Prefijo IPv6") or 128
 	end
 	local canonical = {}
 	for i, byte in ipairs(bytes) do
@@ -62,15 +62,15 @@ function M.address(value, family)
 end
 function M.mac(value)
 	value = tostring(value or ""):lower()
-	if not value:match("^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$") or tonumber(value:sub(1, 2), 16) % 2 ~= 0 or value == "00:00:00:00:00:00" then fail("MAC 地址必须为有效的单播地址") end
+	if not value:match("^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$") or tonumber(value:sub(1, 2), 16) % 2 ~= 0 or value == "00:00:00:00:00:00" then fail("La MAC debe ser una dirección unicast válida") end
 	return value
 end
 local function rate(value, label, mbit)
 	if mbit then
 		local text = tostring(value or "0")
-		if not text:match("^%d+%.?%d*$") or #text > 12 then fail(label .. " 格式错误") end
+		if not text:match("^%d+%.?%d*$") or #text > 12 then fail(label .. " formato no válido") end
 		local n = tonumber(text) * 1000
-		if n < 0 or n > 10000000 or math.abs(n - math.floor(n + 0.5)) > 0.00001 then fail(label .. " 范围为 0–10000 Mbit/s，最多三位小数") end
+		if n < 0 or n > 10000000 or math.abs(n - math.floor(n + 0.5)) > 0.00001 then fail(label .. " rango 0–10000 Mbit/s, máximo 3 decimales") end
 		return math.floor(n + 0.5)
 	end
 	return integer(value, 0, 10000000, label)
@@ -78,21 +78,21 @@ end
 local function port_list(value)
 	local out = {}
 	value = tostring(value or ""):gsub("%s", "")
-	if value == "" or #value > 160 or value:sub(-1) == "," or value:find(",,", 1, true) then fail("端口格式错误") end
+	if value == "" or #value > 160 or value:sub(-1) == "," or value:find(",,", 1, true) then fail("Formato de puerto no válido") end
 	for term in value:gmatch("[^,]+") do
 		local first, last = term:match("^(%d+)[-:](%d+)$")
 		if not first then first = term; last = term end
-		first = integer(first, 1, 65535, "端口"); last = integer(last, first, 65535, "端口")
+		first = integer(first, 1, 65535, "Puerto"); last = integer(last, first, 65535, "Puerto")
 		out[#out + 1] = first == last and tostring(first) or first .. "-" .. last
 	end
-	if #out == 0 or #out > 16 then fail("每条规则最多配置 16 个端口或端口段") end
+	if #out == 0 or #out > 16 then fail("Máximo 16 puertos o rangos por regla") end
 	return out
 end
 M.enabled = enabled
 local function interfaces(values)
 	local result = {}
 	for _, value in ipairs(values or {}) do
-		if type(value) ~= "string" or #value > 15 or not value:match("^[%w_.:@-]+$") then fail("网络接口名称无效") end
+		if type(value) ~= "string" or #value > 15 or not value:match("^[%w_.:@-]+$") then fail("Nombre de interfaz de red no válido") end
 		result[#result + 1] = value
 	end
 	table.sort(result)
@@ -100,15 +100,15 @@ local function interfaces(values)
 end
 function M.plan(config, caps, resolved)
 	local global = config.global or {}
-	local plan = { enabled = enabled(global.enabled), rules = {}, queues = {}, schedulers = {}, lan = interfaces(resolved.lan), wan = interfaces(resolved.wan), total_down = rate(global.download, "总下载", true), total_up = rate(global.upload, "总上传", true), software = false, hardware = false }
+	local plan = { enabled = enabled(global.enabled), rules = {}, queues = {}, schedulers = {}, lan = interfaces(resolved.lan), wan = interfaces(resolved.wan), total_down = rate(global.download, "Bajada total", true), total_up = rate(global.upload, "Subida total", true), software = false, hardware = false }
 	if not plan.enabled then return plan end
-	if #(config.rules or {}) > 128 then fail("最多支持 128 条规则") end
+	if #(config.rules or {}) > 128 then fail("Máximo 128 reglas permitidas") end
 	local seen = {}
 	for index, source in ipairs(config.rules or {}) do
 		if source.enabled ~= "0" then
-			local rule = { id = source.id or tostring(index), name = tostring(source.name or ""), kind = source.selector or "ip", engine = source.engine or "auto", download = rate(source.download, "下载"), upload = rate(source.upload, "上传"), addresses = {}, mac = nil, protocols = {}, ports = {}, port_side = source.port_side or "remote" }
-			if not rule.id:match("^[%w_]+$") or #rule.name > 80 or rule.name:find("[%z\1-\31]") then fail("规则名称无效") end
-			if rule.engine ~= "auto" and rule.engine ~= "hardware" and rule.engine ~= "software" then fail("限速方式无效") end
+			local rule = { id = source.id or tostring(index), name = tostring(source.name or ""), kind = source.selector or "ip", engine = source.engine or "auto", download = rate(source.download, "Bajada"), upload = rate(source.upload, "Subida"), addresses = {}, mac = nil, protocols = {}, ports = {}, port_side = source.port_side or "remote" }
+			if not rule.id:match("^[%w_]+$") or #rule.name > 80 or rule.name:find("[%z\1-\31]") then fail("Nombre de regla no válido") end
+			if rule.engine ~= "auto" and rule.engine ~= "hardware" and rule.engine ~= "software" then fail("Modo de límite no válido") end
 			if rule.download > 0 or rule.upload > 0 then
 				local key
 				if rule.kind == "ip" or rule.kind == "ip6" then
@@ -122,29 +122,29 @@ function M.plan(config, caps, resolved)
 						if ok then rule.addresses[#rule.addresses + 1] = { family = family, value = normalized } end
 					end
 					table.sort(rule.addresses, function(a, b) return a.value < b.value end)
-					if #rule.addresses > 32 then fail("单个 MAC 地址过多，请改用网段匹配") end
+					if #rule.addresses > 32 then fail("Demasiadas IPs para una MAC; usa coincidencia por subred") end
 				elseif rule.kind == "port" then
 					rule.ports = port_list(source.ports)
 					local protocol = source.proto or "both"
-					if protocol ~= "tcp" and protocol ~= "udp" and protocol ~= "both" then fail("端口协议无效") end
+					if protocol ~= "tcp" and protocol ~= "udp" and protocol ~= "both" then fail("Protocolo de puerto no válido") end
 					rule.protocols = protocol == "both" and { "tcp", "udp" } or { protocol }
-					if rule.port_side ~= "local" and rule.port_side ~= "remote" and rule.port_side ~= "any" then fail("端口方向无效") end
+					if rule.port_side ~= "local" and rule.port_side ~= "remote" and rule.port_side ~= "any" then fail("Dirección de puerto no válida") end
 					if source.address and source.address ~= "" then
 						local family = source.address:find(":", 1, true) and "ip6" or "ip"
 						local address = M.address(source.address, family)
 						rule.addresses[1] = { family = family, value = address }
 					end
 					key = "port" .. protocol .. rule.port_side .. table.concat(rule.ports, ",") .. tostring(source.address or "")
-				else fail("匹配类型无效") end
-				if seen[key] then fail("存在重复的限速目标") end
+				else fail("Tipo de coincidencia no válido") end
+				if seen[key] then fail("Objetivo de límite duplicado") end
 				seen[key] = true
 				plan.rules[#plan.rules + 1] = rule
 			end
 		end
 	end
 	if #plan.rules == 0 and plan.total_down == 0 and plan.total_up == 0 then return plan end
-	if #plan.lan ~= 1 then fail("请选择一个已启用的 LAN 网络") end
-	if #plan.wan == 0 then fail("请选择已启用的 WAN 网络") end
+	if #plan.lan ~= 1 then fail("Selecciona una red LAN habilitada") end
+	if #plan.wan == 0 then fail("Selecciona una red WAN habilitada") end
 	local pool = {}
 	for _, queue in ipairs(caps.queues or {}) do
 		local default_min = queue.min_enable == 0 or (queue.min_enable == 1 and queue.min_rate == 10000)
@@ -164,13 +164,13 @@ function M.plan(config, caps, resolved)
 	local position = 1
 	local function allocate(direction, limit)
 		local qid = pool[position]; position = position + 1
-		if not qid then fail("可用硬件队列不足") end
+		if not qid then fail("No hay suficientes colas hardware disponibles") end
 		plan.queues[#plan.queues + 1] = { id = qid, direction = direction, scheduler = direction == "up" and up_sch or down_sch, rate = limit }
 		return qid
 	end
 	plan.default_up, plan.default_down = 0, 0
 	if plan.total_up > 0 or plan.total_down > 0 then
-		if not hw or #scheds < 4 then fail("硬件转发总上限所需的 HNAT 或独立调度器不可用") end
+		if not hw or #scheds < 4 then fail("HNAT o el planificador independiente requerido para el límite global hardware no está disponible") end
 		if plan.total_up > 0 then plan.default_up = allocate("up", 0) end
 		if plan.total_down > 0 then plan.default_down = allocate("down", 0) end
 		plan.hardware = true
@@ -178,7 +178,7 @@ function M.plan(config, caps, resolved)
 	local function choose(rule)
 		local needed = (rule.upload > 0 and 1 or 0) + (rule.download > 0 and 1 or 0)
 		local fits = hw and position + needed - 1 <= #pool
-		if rule.engine == "hardware" and not fits then fail("规则 " .. rule.id .. " 无可用硬件队列、独立调度器或 HNAT 未就绪") end
+		if rule.engine == "hardware" and not fits then fail("Regla " .. rule.id .. ": sin cola hardware, planificador o HNAT listo") end
 		rule.path = rule.engine ~= "software" and fits and "hardware" or "software"
 		if rule.path == "hardware" then
 			plan.hardware = true
@@ -189,7 +189,7 @@ function M.plan(config, caps, resolved)
 	-- Explicit hardware rules take capacity before automatic fallback rules.
 	for _, rule in ipairs(plan.rules) do if rule.engine == "hardware" then choose(rule) end end
 	for _, rule in ipairs(plan.rules) do if rule.engine ~= "hardware" then choose(rule) end end
-	if plan.software and caps.hnat_enabled and not caps.control then fail("软件回退需要更新 HNAT 的 QoS 标记接口") end
+	if plan.software and caps.hnat_enabled and not caps.control then fail("El respaldo por software requiere actualizar la interfaz de marcado QoS de HNAT") end
 	local filters = 0
 	for _, rule in ipairs(plan.rules) do if rule.path == "software" then
 		for _, direction in ipairs({ "up", "down" }) do
@@ -200,7 +200,7 @@ function M.plan(config, caps, resolved)
 			end
 		end
 	end end
-	if filters > 1024 then fail("软件限速过滤器超过 1024 条，请减少端口段或使用网段匹配") end
+	if filters > 1024 then fail("Los filtros por software superan los 1024; reduce rangos de puertos o usa subredes") end
 	if plan.hardware then
 		plan.schedulers = { { id = up_sch, rate = plan.total_up }, { id = down_sch, rate = plan.total_down } }
 	end
@@ -292,7 +292,7 @@ function M.nft(plan)
 	lines[#lines + 1] = "\tchain forward {\n\t\ttype filter hook forward priority -140; policy accept;\n" .. table.concat(forward, "\n") .. "\n\t}"
 	lines[#lines + 1] = "}"
 	local result = table.concat(lines, "\n") .. "\n"
-	if #result > 262144 then fail("限速规则集超过 256 KiB，请减少重复地址或使用网段匹配") end
+	if #result > 262144 then fail("El conjunto de reglas supera 256 KiB; reduce direcciones repetidas o usa subredes") end
 	return result
 end
 return M

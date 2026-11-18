@@ -8,7 +8,7 @@
 		}
 	},
 	"admin/mtk/fan": {
-		"title": "风扇控制",
+		"title": "Control del ventilador",
 		"order": 30,
 		"action": {
 			"type": "view",

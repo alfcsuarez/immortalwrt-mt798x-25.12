@@ -124,11 +124,11 @@ function getAvailableEngines(features, config) {
 	var engines = [];
 
 	if (isEngineAvailable(features.hasFLOWOFFLOADING, config, 'flow_offloading'))
-		engines.push({ key: 'flow_offloading', label: _('流量分载') });
+		engines.push({ key: 'flow_offloading', label: _('Flow Offloading') });
 	if (isEngineAvailable(features.hasFASTCLASSIFIER, config, 'fast_classifier'))
-		engines.push({ key: 'fast_classifier', label: _('快速分类器') });
+		engines.push({ key: 'fast_classifier', label: _('Fast Classifier') });
 	if (isEngineAvailable(features.hasSHORTCUTFECM, config, 'shortcut_fe_cm'))
-		engines.push({ key: 'shortcut_fe_cm', label: _('SFE 连接管理器') });
+		engines.push({ key: 'shortcut_fe_cm', label: _('Gestor de conexiones SFE') });
 	if (isEngineAvailable(features.hasMEDIATEKHNAT, config, 'mediatek_hnat'))
 		engines.push({ key: 'mediatek_hnat', label: _('MediaTek HNAT') });
 
@@ -138,15 +138,15 @@ function getAvailableEngines(features, config) {
 function getEngineLabel(value) {
 	switch (normalizeFastpathValue(value)) {
 	case 'flow_offloading':
-		return _('流量分载');
+		return _('Flow Offloading');
 	case 'fast_classifier':
-		return _('快速分类器');
+		return _('Fast Classifier');
 	case 'shortcut_fe_cm':
-		return _('SFE 连接管理器');
+		return _('Gestor de conexiones SFE');
 	case 'mediatek_hnat':
 		return _('MediaTek HNAT');
 	default:
-		return _('已禁用');
+		return _('Deshabilitado');
 	}
 }
 
@@ -168,15 +168,15 @@ function getEngineShortLabel(value) {
 function getEngineDescription(value) {
 	switch (normalizeFastpathValue(value)) {
 	case 'flow_offloading':
-		return _('软件路由/NAT 分载，通用性最好，但加速深度偏保守。');
+		return _('Descarga por software; compatible pero menos profunda que HNAT.');
 	case 'fast_classifier':
-		return _('面向 SFE 的快速分类器，适合希望继续启用桥接加速的场景。');
+		return _('Clasificador rápido para SFE con soporte de aceleración en puente.');
 	case 'shortcut_fe_cm':
-		return _('SFE 的轻量连接管理器，路径简单，但平台覆盖面更窄。');
+		return _('Gestor ligero de conexiones SFE; ruta simple con menor soporte de plataformas.');
 	case 'mediatek_hnat':
-		return _('mt798x 的有线加速通路，支持本项目 24.10 / 25.12，可配合 PPE 观察绑定情况。');
+		return _('Ruta de aceleración cableada para mt798x compatible con 24.10 / 25.12 y telemetría PPE.');
 	default:
-		return _('当前未启用主加速引擎。');
+		return _('No hay motor principal habilitado.');
 	}
 }
 
@@ -186,11 +186,11 @@ function getRuntimeLabel(token) {
 	switch (token) {
 	case 'Flow Offloading':
 	case 'Flow offloading':
-		return _('流量分载');
+		return _('Flow Offloading');
 	case 'Fast classifier':
-		return _('快速分类器');
+		return _('Fast Classifier');
 	case 'Shortcut-FE CM':
-		return _('SFE 连接管理器');
+		return _('Gestor de conexiones SFE');
 	case 'MediaTek HWNAT':
 	case 'MediaTek HNAT':
 		return _('MediaTek HNAT');
@@ -199,9 +199,9 @@ function getRuntimeLabel(token) {
 	case 'Boardcom Fullcone':
 		return _('Boardcom_FULLCONE_NAT');
 	case 'Ethernet HNAT Disabled':
-		return _('以太网 HNAT 未启用');
+		return _('HNAT Ethernet desactivado');
 	case 'HNAT Partially Enabled':
-		return _('HNAT 部分启用');
+		return _('HNAT habilitado parcialmente');
 	default:
 		return token;
 	}
@@ -233,20 +233,20 @@ function buildStatusMeta(value, emptyDetail, activeDetail) {
 	});
 
 	return {
-		primary: parts.length ? parts[0] : _('已禁用'),
+		primary: parts.length ? parts[0] : _('Deshabilitado'),
 		warnings: parts.length > 1 ? parts.slice(1) : [],
-		detail: parts.length > 1 ? parts.slice(1).join(' · ') : (parts.length ? (activeDetail || parts[0]) : (emptyDetail || _('未检测到活动加速通路。')))
+		detail: parts.length > 1 ? parts.slice(1).join(' · ') : (parts.length ? (activeDetail || parts[0]) : (emptyDetail || _('No se detectó ninguna ruta de aceleración activa.')))
 	};
 }
 
 function getFullconeConfigLabel(value) {
 	switch (trimValue(value)) {
 	case '1':
-		return _('XT_FULLCONE_NAT(更佳的兼容性)');
+		return _('XT_FULLCONE_NAT (mejor compatibilidad)');
 	case '2':
-		return _('Boardcom_FULLCONE_NAT(旧实现兼容)');
+		return _('Boardcom_FULLCONE_NAT (compatibilidad clásica)');
 	default:
-		return _('已禁用');
+		return _('Deshabilitado');
 	}
 }
 
@@ -254,17 +254,17 @@ function getIPv6ModeText(config, features) {
 	var fastpath = normalizeFastpathValue(config.fastpath);
 
 	if (!features.hasIPV6)
-		return _('不可用');
+		return _('No disponible');
 
 	switch (fastpath) {
 	case 'fast_classifier':
-		return config.fastpath_fc_ipv6 ? _('已启用') : _('已禁用');
+		return config.fastpath_fc_ipv6 ? _('Habilitado') : _('Deshabilitado');
 	case 'mediatek_hnat':
-		return (config.fastpath_mh_eth_hnat && config.fastpath_mh_eth_hnat_v6) ? _('已启用') : _('已禁用');
+		return (config.fastpath_mh_eth_hnat && config.fastpath_mh_eth_hnat_v6) ? _('Habilitado') : _('Deshabilitado');
 	case 'disabled':
-		return _('已禁用');
+		return _('Deshabilitado');
 	default:
-		return _('跟随主通路');
+		return _('Según ruta principal');
 	}
 }
 
@@ -272,17 +272,17 @@ function getIPv6ModeDetail(config, features) {
 	var fastpath = normalizeFastpathValue(config.fastpath);
 
 	if (!features.hasIPV6)
-		return _('当前平台未开放 IPv6 加速能力。');
+		return _('La plataforma no expone aceleración IPv6.');
 
 	switch (fastpath) {
 	case 'fast_classifier':
-		return config.fastpath_fc_ipv6 ? _('Fast classifier 已打开 IPv6 加速。') : _('Fast classifier 可单独启用 IPv6 加速。');
+		return config.fastpath_fc_ipv6 ? _('Fast classifier tiene activada la aceleración IPv6.') : _('Fast classifier permite activar aceleración IPv6 por separado.');
 	case 'mediatek_hnat':
-		return config.fastpath_mh_eth_hnat_v6 ? _('有线 IPv6 会话可进入 HNAT 通路。') : _('当前仅加速 IPv4，会保留 IPv6 走常规栈。');
+		return config.fastpath_mh_eth_hnat_v6 ? _('Las sesiones IPv6 cableadas pueden entrar en HNAT.') : _('Actualmente solo acelera IPv4; IPv6 usa la pila estándar.');
 	case 'disabled':
-		return _('主通路关闭时不会有独立 IPv6 加速。');
+		return _('Con la ruta principal apagada no habrá aceleración IPv6.');
 	default:
-		return _('当前引擎没有单独的 IPv6 开关。');
+		return _('Este motor no tiene interruptor IPv6 independiente.');
 	}
 }
 
@@ -503,17 +503,17 @@ function renderEngineCard(engine, configKey, runtimeKey) {
 	var tone = 'is-neutral';
 
 	if (engine.key === configKey) {
-		chips.push(renderChip(_('当前配置'), 'is-info'));
+		chips.push(renderChip(_('Configuración actual'), 'is-info'));
 		tone = 'is-selected';
 	}
 
 	if (engine.key === runtimeKey) {
-		chips.push(renderChip(_('实时生效'), 'is-ok'));
+		chips.push(renderChip(_('Activo en kernel'), 'is-ok'));
 		tone = 'is-live';
 	}
 
 	if (!chips.length)
-		chips.push(renderChip(_('可切换'), 'is-muted'));
+		chips.push(renderChip(_('Conmutable'), 'is-muted'));
 
 	return E('div', { 'class': 'ta-engine-card ' + tone }, [
 		E('div', { 'class': 'ta-engine-top' }, [
@@ -533,8 +533,8 @@ function renderPPEPanel(ppe) {
 
 	return E('div', { 'class': 'ta-panel ta-ppe-panel' }, [
 		E('div', { 'class': 'ta-panel-head' }, [
-			E('div', { 'class': 'ta-panel-title' }, _('PPE 明细')), 
-			E('div', { 'class': 'ta-panel-subtitle' }, _('PPE 通道的已绑定连接数。'))
+			E('div', { 'class': 'ta-panel-title' }, _('Detalle PPE')), 
+			E('div', { 'class': 'ta-panel-subtitle' }, _('Conexiones enlazadas (BIND) en los canales PPE.'))
 		]),
 		E('div', { 'class': 'ta-progress-list' }, rows.map(function(card) {
 			var width = card.bound > 0 && card.all > 0 ? Math.max(card.percent, 1) : 0;
@@ -557,7 +557,7 @@ function renderPPEPanel(ppe) {
 }
 
 function renderFeatureTag(flag, label) {
-	return renderChip((label ? label + ' · ' : '') + (flag ? _('可用') : _('不可用')), flag ? 'is-ok' : 'is-muted');
+	return renderChip((label ? label + ' · ' : '') + (flag ? _('Disponible') : _('No disponible')), flag ? 'is-ok' : 'is-muted');
 }
 
 function getHealthState(state) {
@@ -568,70 +568,70 @@ function getHealthState(state) {
 	var configuredKey = normalizeFastpathValue(config.fastpath);
 	var runtimeType = trimValue(service[0] && service[0].type);
 	var runtimeKey = getRuntimeEngineKey(runtimeType);
-	var runtimeMeta = buildStatusMeta(runtimeType, _('未检测到活动加速通路。'), _('当前内核返回的主加速通路。'));
-	var fullconeMeta = buildStatusMeta(service[1] && service[1].type, _('已禁用'));
+	var runtimeMeta = buildStatusMeta(runtimeType, _('No se detectó ninguna ruta de aceleración activa.'), _('Ruta principal devuelta por el kernel.'));
+	var fullconeMeta = buildStatusMeta(service[1] && service[1].type, _('Deshabilitado'));
 	var tcpccaLabel = trimValue(service[2] && service[2].type) || String(config.tcpcca || '').toUpperCase() || '--';
 	var notes = [];
 	var pills = [];
 	var level = 'is-idle';
-	var headline = _('已禁用');
+	var headline = _('Deshabilitado');
 	var headlineTone = 'is-disabled';
-	var summary = _('当前页面没有检测到活动的数据通路。');
+	var summary = _('No se detectó ninguna ruta de datos activa.');
 	var aligned = configuredKey === runtimeKey || (configuredKey === 'disabled' && runtimeKey === 'disabled');
 
 	if (configuredKey === 'disabled' && runtimeKey === 'disabled') {
 		level = 'is-idle';
-		headline = _('已禁用');
+		headline = _('Deshabilitado');
 		headlineTone = 'is-disabled';
-		summary = _('当前未启用主加速引擎。');
+		summary = _('No hay motor principal habilitado.');
 	}
 	else if (configuredKey === 'disabled' && runtimeKey !== 'disabled') {
 		level = 'is-attention';
-		headline = _('已启用');
+		headline = _('Habilitado');
 		headlineTone = 'is-enabled';
-		summary = _('实时通路仍在工作，但当前配置已经设为禁用。');
+		summary = _('La ruta sigue activa en el kernel aunque la configuración esté deshabilitada.');
 	}
 	else if (configuredKey !== 'disabled' && runtimeKey === configuredKey) {
 		level = 'is-healthy';
-		headline = _('已启用');
+		headline = _('Habilitado');
 		headlineTone = 'is-enabled';
-		summary = _('配置与实时通路一致。');
+		summary = _('La configuración coincide con la ruta activa.');
 	}
 	else if (configuredKey !== 'disabled' && runtimeKey !== 'disabled') {
 		level = 'is-attention';
-		headline = _('已启用');
+		headline = _('Habilitado');
 		headlineTone = 'is-enabled';
-		summary = _('实时通路与配置不一致。');
+		summary = _('La ruta activa no coincide con la configuración.');
 	}
 	else {
 		level = 'is-warning';
-		headline = _('已禁用');
+		headline = _('Deshabilitado');
 		headlineTone = 'is-disabled';
-		summary = _('已配置，但当前未看到活动通路。');
+		summary = _('Configurado, pero no se detecta ninguna ruta activa.');
 	}
 
-	pills.push(renderChip(_('配置') + ' · ' + getEngineLabel(configuredKey), 'is-info'));
-	pills.push(renderChip(_('实时') + ' · ' + runtimeMeta.primary, runtimeKey === 'disabled' ? 'is-muted' : 'is-ok'));
+	pills.push(renderChip(_('Configuración') + ' · ' + getEngineLabel(configuredKey), 'is-info'));
+	pills.push(renderChip(_('En vivo') + ' · ' + runtimeMeta.primary, runtimeKey === 'disabled' ? 'is-muted' : 'is-ok'));
 	if (configuredKey === 'mediatek_hnat' && ppe.totalAll != null)
 		pills.push(renderChip(_('PPE') + ' · ' + formatSessions(ppe.totalBound, ppe.totalAll), 'is-info'));
 
 	if (!aligned && configuredKey !== 'disabled')
-		notes.push(_('已选择 ') + getEngineLabel(configuredKey) + _('，但实时内核仍显示 ') + runtimeMeta.primary + _('。'));
+		notes.push(_('Seleccionado: ') + getEngineLabel(configuredKey) + _(', pero el kernel aún muestra ') + runtimeMeta.primary + _('。'));
 
 	if (runtimeMeta.warnings.length)
-		notes.push(_('运行告警：') + runtimeMeta.warnings.join(' · '));
+		notes.push(_('Avisos en ejecución: ') + runtimeMeta.warnings.join(' · '));
 
 	if (configuredKey === 'mediatek_hnat' && !config.fastpath_mh_eth_hnat)
-		notes.push(_('已选 MediaTek HNAT，但“启用有线 HNAT”当前未打开。'));
+		notes.push(_('MediaTek HNAT seleccionado, pero «Habilitar HNAT cableado» está apagado.'));
 
 	if (configuredKey === 'mediatek_hnat' && config.fastpath_mh_eth_hnat && features.hasIPV6 && !config.fastpath_mh_eth_hnat_v6)
-		notes.push(_('IPv6 当前未进入 HNAT，若有纯 IPv6 场景可视需求再开启。'));
+		notes.push(_('IPv6 no entra actualmente en HNAT; actívalo solo si usas IPv6 puro.'));
 
 	if (configuredKey === 'fast_classifier' && config.fastpath_fc_br)
-		notes.push(_('桥接加速已打开，若桥接模式 VPN 出现异常，应优先回看这一项。'));
+		notes.push(_('Aceleración de puente activada; revisa esto si una VPN en puente falla.'));
 
 	if (configuredKey === 'mediatek_hnat' && ppe.totalAll != null)
-		notes.push(_('当前 PPE 总容量：') + formatSessions(ppe.totalBound, ppe.totalAll));
+		notes.push(_('Capacidad total PPE: ') + formatSessions(ppe.totalBound, ppe.totalAll));
 
 	return {
 		level: level,
@@ -666,14 +666,14 @@ function renderHero(state, health) {
 				E('span', { 'class': 'ta-hero-badge-dot' })
 			]),
 			E('div', { 'class': 'ta-hero-copy' }, [
-				E('div', { 'class': 'ta-hero-kicker' }, _('TurboACC 控制台')),
+				E('div', { 'class': 'ta-hero-kicker' }, _('Panel TurboACC')),
 				E('div', { 'class': 'ta-hero-title ' + health.headlineTone }, health.headline),
 				E('div', { 'class': 'ta-hero-summary' }, health.summary)
 			])
 		]),
 		E('div', { 'class': 'ta-hero-side' }, compactChildren([
-			renderSectionPill(_('实时通路'), health.runtimeMeta.primary, health.runtimeKey === 'disabled' ? 'is-muted' : 'is-good'),
-			renderSectionPill(hnatProfile ? _('PPE 连接数') : _('当前配置'), summaryValue, hnatProfile ? 'is-accent' : 'is-info')
+			renderSectionPill(_('Ruta en vivo'), health.runtimeMeta.primary, health.runtimeKey === 'disabled' ? 'is-muted' : 'is-good'),
+			renderSectionPill(hnatProfile ? _('Conexiones PPE') : _('Configuración actual'), summaryValue, hnatProfile ? 'is-accent' : 'is-info')
 		]))
 	]);
 }
@@ -683,11 +683,11 @@ function renderStatusStrip(state, health) {
 	var config = state.config || {};
 	var ipv6Text = getIPv6ModeText(config, features);
 	var fullconeEnabled = trimValue(config.fullcone) !== '0';
-	var ipv6Enabled = ipv6Text !== _('已禁用') && ipv6Text !== _('不可用');
+	var ipv6Enabled = ipv6Text !== _('Deshabilitado') && ipv6Text !== _('No disponible');
 
 	return E('div', { 'class': 'ta-status-strip' }, [
 		E('div', { 'class': 'ta-status-item' }, [
-			E('span', {}, _('配置')),
+			E('span', {}, _('Configuración')),
 			renderStatusStrong(getEngineLabel(config.fastpath), normalizeFastpathValue(config.fastpath) !== 'disabled')
 		]),
 		E('div', { 'class': 'ta-status-item' }, [
@@ -716,21 +716,21 @@ function renderSummaryGrid(state, health) {
 		? formatSessions(ppe.totalBound, ppe.totalAll)
 		: String(engineCount);
 	var sessionDetail = normalizeFastpathValue(config.fastpath) === 'mediatek_hnat'
-		? (_('PPE 通道') + ': ' + displayValue(ppe.count) + ' · ' + _('绑定阈值') + ': ' + config.fastpath_mh_eth_hnat_bind_rate + ' pps')
-		: (_('当前可切换主引擎数量') + ': ' + String(engineCount));
+		? (_('Canales PPE') + ': ' + displayValue(ppe.count) + ' · ' + _('Umbral de enlace') + ': ' + config.fastpath_mh_eth_hnat_bind_rate + ' pps')
+		: (_('Motores principales disponibles') + ': ' + String(engineCount));
 
 	return E('div', { 'class': 'ta-summary-grid' }, [
-		renderStatCard(_('配置档案'), getEngineLabel(config.fastpath), getEngineDescription(config.fastpath), 'is-primary', [
-			renderChip(config.fastpath === 'disabled' ? _('未启用') : _('已选择'), config.fastpath === 'disabled' ? 'is-muted' : 'is-info')
+		renderStatCard(_('Perfil'), getEngineLabel(config.fastpath), getEngineDescription(config.fastpath), 'is-primary', [
+			renderChip(config.fastpath === 'disabled' ? _('Deshabilitado') : _('Seleccionado'), config.fastpath === 'disabled' ? 'is-muted' : 'is-info')
 		]),
-		renderStatCard(_('实时通路'), health.runtimeMeta.primary, health.runtimeMeta.detail, 'is-good', health.runtimeMeta.warnings.map(function(tag) {
+		renderStatCard(_('Ruta en vivo'), health.runtimeMeta.primary, health.runtimeMeta.detail, 'is-good', health.runtimeMeta.warnings.map(function(tag) {
 			return renderChip(tag, 'is-warning');
 		})),
-		renderStatCard(_('NAT / TCP 策略'), getFullconeConfigLabel(config.fullcone), _('TCP CCA') + ' · ' + health.tcpccaLabel, 'is-warning', [
-			renderChip(_('IPv6') + ' · ' + ipv6Text, ipv6Text === _('已启用') ? 'is-ok' : 'is-muted')
+		renderStatCard(_('Política NAT / TCP'), getFullconeConfigLabel(config.fullcone), _('TCP CCA') + ' · ' + health.tcpccaLabel, 'is-warning', [
+			renderChip(_('IPv6') + ' · ' + ipv6Text, ipv6Text === _('Habilitado') ? 'is-ok' : 'is-muted')
 		]),
-		renderStatCard(normalizeFastpathValue(config.fastpath) === 'mediatek_hnat' ? _('PPE 会话') : _('引擎储备'), sessionValue, sessionDetail, 'is-accent', [
-			renderChip(_('实时遥测'), 'is-info')
+		renderStatCard(normalizeFastpathValue(config.fastpath) === 'mediatek_hnat' ? _('Sesiones PPE') : _('Motores disponibles'), sessionValue, sessionDetail, 'is-accent', [
+			renderChip(_('Telemetría en vivo'), 'is-info')
 		])
 	]);
 }
@@ -743,43 +743,43 @@ function renderFocusGrid(state, health) {
 
 	return E('div', { 'class': 'ta-focus-grid' }, [
 		renderInsightCard(
-			_('有线数据通路'),
-			hnatEnabled ? (config.fastpath_mh_eth_hnat ? _('已放行') : _('待放行')) : health.runtimeMeta.primary,
-			hnatEnabled ? _('MediaTek HNAT 是 mt798x 24.10 上最值得优先确认的主通路。') : _('当前主通路决定了大部分路由/NAT 转发行为。'),
+			_('Ruta de datos cableada'),
+			hnatEnabled ? (config.fastpath_mh_eth_hnat ? _('Permitido') : _('Pendiente')) : health.runtimeMeta.primary,
+			hnatEnabled ? _('MediaTek HNAT es la ruta principal recomendada en mt798x.') : _('La ruta principal determina el reenvío de enrutamiento y NAT.'),
 			'is-primary',
 			[
-				[ _('实时引擎'), health.runtimeMeta.primary ],
-				[ _('桥接加速'), config.fastpath_fc_br ? _('已启用') : _('未启用') ],
-				[ _('有线 HNAT'), hnatEnabled ? (config.fastpath_mh_eth_hnat ? _('已启用') : _('未启用')) : null ]
+				[ _('Motor activo'), health.runtimeMeta.primary ],
+				[ _('Aceleración de puente'), config.fastpath_fc_br ? _('Habilitado') : _('Deshabilitado') ],
+				[ _('HNAT cableado'), hnatEnabled ? (config.fastpath_mh_eth_hnat ? _('Habilitado') : _('Deshabilitado')) : null ]
 			],
 			[
-				renderChip(hnatEnabled ? _('优先检查') : _('按需切换'), 'is-info')
+				renderChip(hnatEnabled ? _('Comprobación prioritaria') : _('Según necesidad'), 'is-info')
 			]
 		),
 		renderInsightCard(
-			_('游戏与 NAT 行为'),
+			_('Juegos y comportamiento NAT'),
 			getFullconeConfigLabel(config.fullcone),
-			_('全锥形 NAT 主要影响联机和端口映射体验，不代表主通路本身一定工作。'),
+			_('Full Cone NAT mejora el juego en línea y mapeo de puertos.'),
 			'is-warning',
 			[
-				[ _('实时反馈'), health.fullconeMeta.primary ],
-				[ _('风险提示'), trimValue(config.fullcone) === '0' ? _('联机型业务更依赖手动映射') : _('更适合游戏主机与 P2P 场景') ]
+				[ _('Estado en tiempo real'), health.fullconeMeta.primary ],
+				[ _('Advertencia'), trimValue(config.fullcone) === '0' ? _('El juego en línea depende del mapeo manual o UPnP') : _('Recomendado para consolas y P2P') ]
 			],
 			[
-				renderChip(_('体验侧'), 'is-warning')
+				renderChip(_('Experiencia'), 'is-warning')
 			]
 		),
 		renderInsightCard(
-			_('IPv6 与高级调优'),
+			_('IPv6 y ajuste avanzado'),
 			getIPv6ModeText(config, features),
 			getIPv6ModeDetail(config, features),
 			'is-accent',
 			[
-				[ _('绑定阈值'), hnatEnabled && config.fastpath_mh_eth_hnat ? (config.fastpath_mh_eth_hnat_bind_rate + ' pps') : null ],
-				[ _('PPE 总览'), hnatEnabled ? formatSessions(ppe.totalBound, ppe.totalAll) : null ]
+				[ _('Umbral de enlace'), hnatEnabled && config.fastpath_mh_eth_hnat ? (config.fastpath_mh_eth_hnat_bind_rate + ' pps') : null ],
+				[ _('Resumen PPE'), hnatEnabled ? formatSessions(ppe.totalBound, ppe.totalAll) : null ]
 			],
 			[
-				renderChip(_('高级项'), 'is-muted')
+				renderChip(_('Opciones avanzadas'), 'is-muted')
 			]
 		)
 	]);
@@ -793,8 +793,8 @@ function renderEngineRail(state, health) {
 
 	return E('div', { 'class': 'ta-panel' }, [
 		E('div', { 'class': 'ta-panel-head' }, [
-			E('div', { 'class': 'ta-panel-title' }, _('通路候选')), 
-			E('div', { 'class': 'ta-panel-subtitle' }, _('把“当前配置”和“实时生效”并排摆出来，避免只看配置误判真实状态。'))
+			E('div', { 'class': 'ta-panel-title' }, _('Rutas candidatas')), 
+			E('div', { 'class': 'ta-panel-subtitle' }, _('Compara la configuración guardada con el estado real del kernel.'))
 		]),
 		E('div', { 'class': 'ta-engine-grid' }, availableEngines.map(function(engine) {
 			return renderEngineCard(engine, health.configuredKey, health.runtimeKey);
@@ -810,40 +810,40 @@ function renderTelemetryGrid(state, health) {
 	return E('div', { 'class': 'ta-telemetry-grid' }, compactChildren([
 		E('div', { 'class': 'ta-panel' }, [
 			E('div', { 'class': 'ta-panel-head' }, [
-				E('div', { 'class': 'ta-panel-title' }, _('实时遥测')), 
-				E('div', { 'class': 'ta-panel-subtitle' }, _('这里读的是当前内核和 rpcd 的实际返回，不是单纯的表单配置。'))
+				E('div', { 'class': 'ta-panel-title' }, _('Telemetría en vivo')), 
+				E('div', { 'class': 'ta-panel-subtitle' }, _('Muestra el estado real devuelto por el kernel y rpcd.'))
 			]),
 			renderInfoGrid([
-				[ _('主加速引擎'), health.runtimeMeta.primary ],
-				[ _('运行告警'), health.runtimeMeta.warnings.length ? E('div', { 'class': 'ta-chip-list' }, health.runtimeMeta.warnings.map(function(tag) {
+				[ _('Motor principal de aceleración'), health.runtimeMeta.primary ],
+				[ _('Avisos en ejecución'), health.runtimeMeta.warnings.length ? E('div', { 'class': 'ta-chip-list' }, health.runtimeMeta.warnings.map(function(tag) {
 					return renderChip(tag, 'is-warning');
-				})) : renderChip(_('无'), 'is-ok') ],
-				[ _('全锥形 NAT'), health.fullconeMeta.primary ],
+				})) : renderChip(_('Ninguno'), 'is-ok') ],
+				[ _('Full Cone NAT'), health.fullconeMeta.primary ],
 				[ _('TCP CCA'), health.tcpccaLabel ],
-				[ _('IPv6 加速'), getIPv6ModeText(config, features) ],
-				[ _('PPE 通道数'), normalizeFastpathValue(config.fastpath) === 'mediatek_hnat' ? displayValue(ppe.count) : null ],
-				[ _('已绑定会话'), normalizeFastpathValue(config.fastpath) === 'mediatek_hnat' ? formatSessions(ppe.totalBound, ppe.totalAll) : null ]
+				[ _('Aceleración IPv6'), getIPv6ModeText(config, features) ],
+				[ _('Canales PPE'), normalizeFastpathValue(config.fastpath) === 'mediatek_hnat' ? displayValue(ppe.count) : null ],
+				[ _('Sesiones enlazadas (BIND)'), normalizeFastpathValue(config.fastpath) === 'mediatek_hnat' ? formatSessions(ppe.totalBound, ppe.totalAll) : null ]
 			])
 		]),
 		E('div', { 'class': 'ta-side-stack' }, compactChildren([
-			renderChecklist(_('当前判断'), health.notes.slice(0, 4), health.level),
+			renderChecklist(_('Diagnóstico actual'), health.notes.slice(0, 4), health.level),
 			E('div', { 'class': 'ta-note-card is-neutral' }, [
-				E('div', { 'class': 'ta-note-title' }, _('能力矩阵')), 
+				E('div', { 'class': 'ta-note-title' }, _('Matriz de capacidades')), 
 				E('div', { 'class': 'ta-capability-grid' }, [
-					renderFeatureTag(features.hasFLOWOFFLOADING, _('流量分载')),
-					renderFeatureTag(features.hasFASTCLASSIFIER, _('快速分类器')),
+					renderFeatureTag(features.hasFLOWOFFLOADING, _('Flow Offloading')),
+					renderFeatureTag(features.hasFASTCLASSIFIER, _('Fast Classifier')),
 					renderFeatureTag(features.hasSHORTCUTFECM, _('SFE')),
 					renderFeatureTag(features.hasMEDIATEKHNAT, _('HNAT')),
 					renderFeatureTag(features.hasXTFULLCONENAT, _('FullCone')),
 					renderFeatureTag(features.hasIPV6, _('IPv6'))
 				]),
 				renderInfoGrid([
-					[ _('流量分载'), renderFeatureTag(features.hasFLOWOFFLOADING) ],
-					[ _('快速分类器'), renderFeatureTag(features.hasFASTCLASSIFIER) ],
-					[ _('SFE 连接管理器'), renderFeatureTag(features.hasSHORTCUTFECM) ],
+					[ _('Flow Offloading'), renderFeatureTag(features.hasFLOWOFFLOADING) ],
+					[ _('Fast Classifier'), renderFeatureTag(features.hasFASTCLASSIFIER) ],
+					[ _('Gestor de conexiones SFE'), renderFeatureTag(features.hasSHORTCUTFECM) ],
 					[ _('MediaTek HNAT'), renderFeatureTag(features.hasMEDIATEKHNAT) ],
 					[ _('XT_FULLCONE_NAT'), renderFeatureTag(features.hasXTFULLCONENAT) ],
-					[ _('内核 IPv6 协议栈'), renderFeatureTag(features.hasIPV6) ]
+					[ _('Pila IPv6 del kernel'), renderFeatureTag(features.hasIPV6) ]
 				])
 			])
 		]))
@@ -855,8 +855,8 @@ function renderCompactHero(state, health) {
 	var ppe = state.ppe || {};
 	var hnatProfile = normalizeFastpathValue(config.fastpath) === 'mediatek_hnat';
 	var chips = compactChildren([
-		renderChip(_('配置') + ' · ' + getEngineLabel(config.fastpath), 'is-info'),
-		renderChip(_('实时') + ' · ' + health.runtimeMeta.primary, health.runtimeKey === 'disabled' ? 'is-muted' : 'is-ok'),
+		renderChip(_('Configuración') + ' · ' + getEngineLabel(config.fastpath), 'is-info'),
+		renderChip(_('En vivo') + ' · ' + health.runtimeMeta.primary, health.runtimeKey === 'disabled' ? 'is-muted' : 'is-ok'),
 		renderChip(_('TCP') + ' · ' + health.tcpccaLabel, 'is-info'),
 		hnatProfile ? renderChip(_('PPE') + ' · ' + formatSessions(ppe.totalBound, ppe.totalAll), 'is-info') : null
 	]);
@@ -864,7 +864,7 @@ function renderCompactHero(state, health) {
 	return E('div', { 'class': 'ta-panel ta-compact-hero ' + health.level }, compactChildren([
 		E('div', { 'class': 'ta-compact-hero-top' }, [
 			E('div', { 'class': 'ta-compact-hero-copy' }, [
-				E('div', { 'class': 'ta-compact-kicker' }, _('TurboACC 控制台')),
+				E('div', { 'class': 'ta-compact-kicker' }, _('Panel TurboACC')),
 				E('div', { 'class': 'ta-compact-headline' }, health.headline),
 				E('div', { 'class': 'ta-compact-summary' }, health.summary)
 			]),
@@ -879,30 +879,30 @@ function renderCompactOverviewLegacy(state, health) {
 	var config = state.config || {};
 	var ppe = state.ppe || {};
 	var rows = [
-		[ _('主加速引擎'), getEngineLabel(config.fastpath) ],
-		[ _('实时通路'), health.runtimeMeta.primary ],
-		[ _('全锥形 NAT'), health.fullconeMeta.primary ],
+		[ _('Motor principal de aceleración'), getEngineLabel(config.fastpath) ],
+		[ _('Ruta en vivo'), health.runtimeMeta.primary ],
+		[ _('Full Cone NAT'), health.fullconeMeta.primary ],
 		[ _('TCP CCA'), health.tcpccaLabel ],
 		[ _('IPv6'), getIPv6ModeText(config, features) ]
 	];
 
 	if (normalizeFastpathValue(config.fastpath) === 'mediatek_hnat') {
 		rows.push(
-			[ _('PPE 通道数'), displayValue(ppe.count) ],
-			[ _('PPE 连接数'), formatSessions(ppe.totalBound, ppe.totalAll) ],
-			[ _('绑定阈值'), config.fastpath_mh_eth_hnat ? (config.fastpath_mh_eth_hnat_bind_rate + ' pps') : null ]
+			[ _('Canales PPE'), displayValue(ppe.count) ],
+			[ _('Conexiones PPE'), formatSessions(ppe.totalBound, ppe.totalAll) ],
+			[ _('Umbral de enlace'), config.fastpath_mh_eth_hnat ? (config.fastpath_mh_eth_hnat_bind_rate + ' pps') : null ]
 		);
 	}
 
 	return E('div', { 'class': 'ta-compact-grid' }, compactChildren([
 		E('div', { 'class': 'ta-panel' }, [
 			E('div', { 'class': 'ta-panel-head' }, [
-				E('div', { 'class': 'ta-panel-title' }, _('运行状态')),
-				E('div', { 'class': 'ta-panel-subtitle' }, _('只保留最常用的运行状态与实时信息。'))
+				E('div', { 'class': 'ta-panel-title' }, _('Estado de ejecución')),
+				E('div', { 'class': 'ta-panel-subtitle' }, _('Solo el estado de ejecución e información en tiempo real más útil.'))
 			]),
 			renderInfoGrid(rows)
 		]),
-		renderChecklist(_('提示'), health.notes.slice(0, 3), health.level)
+		renderChecklist(_('Aviso'), health.notes.slice(0, 3), health.level)
 	]));
 }
 
@@ -920,19 +920,19 @@ function renderCompactOverview(state, health) {
 		? health.runtimeMeta.warnings.map(function(tag) {
 			return renderChip(tag, 'is-warning');
 		})
-		: [ renderChip(_('状态正常'), 'is-ok') ];
+		: [ renderChip(_('Estado correcto'), 'is-ok') ];
 	var metricCards = [
 		renderStatCard(
-			_('总状态'),
+			_('Estado general'),
 			health.headline,
 			health.summary,
 			statusTone,
 			[
-				renderChip(_('配置') + ' 路 ' + getEngineLabel(config.fastpath), 'is-info')
+				renderChip(_('Configuración') + ' canales ' + getEngineLabel(config.fastpath), 'is-info')
 			]
 		),
 		renderStatCard(
-			_('实时通路'),
+			_('Ruta en vivo'),
 			health.runtimeMeta.primary,
 			health.runtimeMeta.detail,
 			health.runtimeKey === 'disabled' ? 'is-accent' : 'is-good',
@@ -941,50 +941,50 @@ function renderCompactOverview(state, health) {
 		renderStatCard(
 			_('NAT / TCP'),
 			getFullconeConfigLabel(config.fullcone),
-			_('TCP CCA') + ' 路 ' + health.tcpccaLabel,
+			_('TCP CCA') + ' canales ' + health.tcpccaLabel,
 			'is-warning',
 			[
-				renderChip(_('IPv6') + ' 路 ' + ipv6Text, ipv6Text === _('已启用') ? 'is-ok' : 'is-muted')
+				renderChip(_('IPv6') + ' canales ' + ipv6Text, ipv6Text === _('Habilitado') ? 'is-ok' : 'is-muted')
 			]
 		)
 	];
 	var rows = [
-		[ _('主加速引擎'), getEngineLabel(config.fastpath) ],
-		[ _('实时通路'), health.runtimeMeta.primary ],
-		[ _('运行告警'), health.runtimeMeta.warnings.length ? health.runtimeMeta.warnings.join(' / ') : _('无') ],
-		[ _('全锥形 NAT'), health.fullconeMeta.primary ],
+		[ _('Motor principal de aceleración'), getEngineLabel(config.fastpath) ],
+		[ _('Ruta en vivo'), health.runtimeMeta.primary ],
+		[ _('Avisos en ejecución'), health.runtimeMeta.warnings.length ? health.runtimeMeta.warnings.join(' / ') : _('Ninguno') ],
+		[ _('Full Cone NAT'), health.fullconeMeta.primary ],
 		[ _('TCP CCA'), health.tcpccaLabel ],
 		[ _('IPv6'), ipv6Text ]
 	];
 
 	if (normalizeFastpathValue(config.fastpath) === 'mediatek_hnat') {
 		metricCards.push(renderStatCard(
-			_('PPE 连接'),
+			_('Conexiones PPE'),
 			formatSessions(ppe.totalBound, ppe.totalAll),
-			_('通道') + ' 路 ' + displayValue(ppe.count) + ' 路 ' + _('阈值') + ' 路 ' +
+			_('Canal') + ' canales ' + displayValue(ppe.count) + ' canales ' + _('Umbral') + ' canales ' +
 				(config.fastpath_mh_eth_hnat ? (config.fastpath_mh_eth_hnat_bind_rate + ' pps') : '--'),
 			'is-accent',
 			[
 				renderChip(
-					config.fastpath_mh_eth_hnat ? _('有线 HNAT 已启用') : _('有线 HNAT 未启用'),
+					config.fastpath_mh_eth_hnat ? _('HNAT cableado habilitado') : _('HNAT cableado deshabilitado'),
 					config.fastpath_mh_eth_hnat ? 'is-ok' : 'is-muted'
 				)
 			]
 		));
 		rows.push(
-			[ _('PPE 通道数'), displayValue(ppe.count) ],
-			[ _('PPE 连接数'), formatSessions(ppe.totalBound, ppe.totalAll) ],
-			[ _('绑定阈值'), config.fastpath_mh_eth_hnat ? (config.fastpath_mh_eth_hnat_bind_rate + ' pps') : null ]
+			[ _('Canales PPE'), displayValue(ppe.count) ],
+			[ _('Conexiones PPE'), formatSessions(ppe.totalBound, ppe.totalAll) ],
+			[ _('Umbral de enlace'), config.fastpath_mh_eth_hnat ? (config.fastpath_mh_eth_hnat_bind_rate + ' pps') : null ]
 		);
 	}
 	else {
 		metricCards.push(renderStatCard(
-			_('当前配置'),
+			_('Configuración actual'),
 			getEngineLabel(config.fastpath),
 			getEngineDescription(config.fastpath),
 			'is-primary',
 			[
-				renderChip(_('主通路'), 'is-info')
+				renderChip(_('Ruta principal'), 'is-info')
 			]
 		));
 	}
@@ -992,15 +992,15 @@ function renderCompactOverview(state, health) {
 	return E('div', { 'class': 'ta-compact-grid' }, [
 		E('div', { 'class': 'ta-panel ta-compact-status-panel' }, [
 			E('div', { 'class': 'ta-panel-head' }, [
-				E('div', { 'class': 'ta-panel-title' }, _('运行状态')),
-				E('div', { 'class': 'ta-panel-subtitle' }, _('把当前配置、实时通路和关键策略拆开看，排查与确认都会更直接。'))
+				E('div', { 'class': 'ta-panel-title' }, _('Estado de ejecución')),
+				E('div', { 'class': 'ta-panel-subtitle' }, _('Separa configuración, ruta activa y políticas para facilitar el diagnóstico.'))
 			]),
 			E('div', { 'class': 'ta-summary-grid ta-compact-summary-grid' }, metricCards)
 		]),
 		E('div', { 'class': 'ta-panel ta-compact-detail-panel' }, [
 			E('div', { 'class': 'ta-panel-head' }, [
-				E('div', { 'class': 'ta-panel-title' }, _('运行明细')),
-				E('div', { 'class': 'ta-panel-subtitle' }, _('保留最常用的实时明细，避免页面信息过多又不易定位。'))
+				E('div', { 'class': 'ta-panel-title' }, _('Detalles de ejecución')),
+				E('div', { 'class': 'ta-panel-subtitle' }, _('Muestra solo el detalle en tiempo real más útil para facilitar el diagnóstico.'))
 			]),
 			renderInfoGrid(rows)
 		])
@@ -1018,8 +1018,8 @@ function renderOverviewContent(state) {
 }
 
 function buildForm(features, config) {
-	var m = new form.Map('turboacc', _('TurboACC 配置面板'),
-		_('只保留常用配置项，更改后保存并应用即可。'));
+	var m = new form.Map('turboacc', _('Configuración de TurboACC'),
+		_('Solo opciones esenciales; guarda y aplica tras cambiar.'));
 	var s = m.section(form.NamedSection, 'config', 'turboacc');
 	var o;
 	var tcpccaOptions = parseTokenList(features.hasTCPCCA);
@@ -1028,29 +1028,29 @@ function buildForm(features, config) {
 	var showShortcutFeCm = features.hasSHORTCUTFECM === true || config.fastpath === 'shortcut_fe_cm';
 	var showMediatekHnat = true;
 
-	s.tab('engine', _('主通路'), _('选择主加速引擎。'));
-	s.tab('experience', _('体验优化'), _('NAT 与 TCP 设置。'));
+	s.tab('engine', _('Ruta principal'), _('Selecciona el motor principal de aceleración.'));
+	s.tab('experience', _('Optimización de experiencia'), _('Ajustes de NAT y TCP.'));
 
 	if (showMediatekHnat)
-		s.tab('hnat', _('HNAT 高级项'), _('MediaTek HNAT 专用设置。'));
+		s.tab('hnat', _('Opciones avanzadas de HNAT'), _('Ajustes específicos de MediaTek HNAT.'));
 
-	o = s.taboption('engine', form.ListValue, 'fastpath', _('主加速引擎'),
-		_('选择当前使用的加速方式。'));
-	o.value('disabled', _('禁用'));
+	o = s.taboption('engine', form.ListValue, 'fastpath', _('Motor principal de aceleración'),
+		_('Selecciona el método de aceleración.'));
+	o.value('disabled', _('Deshabilitar'));
 	if (showFlowOffloading)
-		o.value('flow_offloading', _('流量分载'));
+		o.value('flow_offloading', _('Flow Offloading'));
 	if (showFastClassifier)
-		o.value('fast_classifier', _('快速分类器'));
+		o.value('fast_classifier', _('Fast Classifier'));
 	if (showShortcutFeCm)
-		o.value('shortcut_fe_cm', _('SFE 连接管理器'));
-	o.value('mediatek_hnat', features.hasMEDIATEKHNAT ? _('MediaTek HNAT') : _('MediaTek HNAT（保存后尝试）'));
+		o.value('shortcut_fe_cm', _('Gestor de conexiones SFE'));
+	o.value('mediatek_hnat', features.hasMEDIATEKHNAT ? _('MediaTek HNAT') : _('MediaTek HNAT (intentar al guardar)'));
 	o.validate = function(section, value) {
 		if (features.eqosActive && value !== 'mediatek_hnat')
-			return _('请先在 EQoS 页面关闭限速服务，再切换加速引擎。');
+			return _('Desactiva primero EQoS antes de cambiar el motor.');
 		if ((value === 'flow_offloading' && !features.hasFLOWOFFLOADING) ||
 			(value === 'fast_classifier' && !features.hasFASTCLASSIFIER) ||
 			(value === 'shortcut_fe_cm' && !features.hasSHORTCUTFECM))
-			return _('当前固件未提供这个加速引擎，请选择可用的引擎。');
+			return _('Este motor no está incluido; elige uno disponible.');
 		return true;
 	};
 	o.default = config.fastpath || 'disabled';
@@ -1058,34 +1058,34 @@ function buildForm(features, config) {
 	o.rmempty = false;
 	var engineStatus = {
 		'disabled': {
-			label: _('关闭'),
+			label: _('Desactivado'),
 			cls: 'is-neutral',
-			title: _('关闭转发加速'),
-			hint: _('不启用额外加速，网络和 Wi-Fi 会按系统默认方式运行。')
+			title: _('Desactivar aceleración'),
+			hint: _('Sin aceleración extra; la red y el Wi-Fi funcionan en modo estándar.')
 		},
 		'flow_offloading': {
-			label: _('保留选项'),
+			label: _('Opción heredada'),
 			cls: 'is-warning',
-			title: _('Flow Offloading 是兼容旧配置的保留选项。'),
-			hint: _('保留给旧配置使用；当前固件通常优先使用 HNAT，系统不支持时会自动跳过。')
+			title: _('Flow Offloading es una opción heredada de compatibilidad.'),
+			hint: _('Mantenido por compatibilidad; este firmware prioriza HNAT.')
 		},
 		'fast_classifier': {
-			label: _('保留选项'),
+			label: _('Opción heredada'),
 			cls: 'is-warning',
-			title: _('Fast Classifier 是兼容旧配置的保留选项。'),
-			hint: _('当前固件未提供 Fast Classifier 模块；保存后若无法加载，会自动跳过，不影响网络。')
+			title: _('Fast Classifier es una opción heredada de compatibilidad.'),
+			hint: _('Módulo Fast Classifier no incluido en este firmware.')
 		},
 		'shortcut_fe_cm': {
-			label: _('保留选项'),
+			label: _('Opción heredada'),
 			cls: 'is-warning',
-			title: _('SFE 连接管理器是兼容旧配置的保留选项。'),
-			hint: _('当前固件未提供 SFE 连接管理器模块；保存后若无法加载，会自动跳过，不影响网络。')
+			title: _('El gestor SFE es una opción heredada de compatibilidad.'),
+			hint: _('Módulo SFE no incluido en este firmware.')
 		},
 		'mediatek_hnat': {
-			label: features.hasMEDIATEKHNAT ? _('推荐') : _('待加载'),
+			label: features.hasMEDIATEKHNAT ? _('Recomendado') : _('Pendiente de cargar'),
 			cls: features.hasMEDIATEKHNAT ? 'is-ok' : 'is-warning',
-			title: features.hasMEDIATEKHNAT ? _('MediaTek HNAT 已可用，适合 MT7988 硬件加速。') : _('MediaTek HNAT 当前未检测到，保存后会尝试加载。'),
-			hint: features.hasMEDIATEKHNAT ? _('MediaTek HNAT（PPE + WED + HNAT），绕过 CPU 直接硬件转发，推荐作为主加速引擎。') : _('当前尚未检测到 HNAT 模块；保存配置后会尝试加载，失败时不影响基础网络。')
+			title: features.hasMEDIATEKHNAT ? _('MediaTek HNAT disponible; ideal para aceleración hardware en MT7988.') : _('MediaTek HNAT no detectado ahora; se intentará cargar al guardar.'),
+			hint: features.hasMEDIATEKHNAT ? _('MediaTek HNAT (PPE + WED + HNAT): reenvío por hardware sin pasar por CPU (recomendado).') : _('Módulo HNAT no detectado aún; se intentará cargar al guardar.')
 		}
 	};
 	var updateEngineStatus = function(container, value) {
@@ -1141,36 +1141,36 @@ function buildForm(features, config) {
 		return value === 'disabled' || value === 'flow_offloading' || value === 'fast_classifier' ||
 			value === 'shortcut_fe_cm' || value === 'mediatek_hnat'
 				? true
-				: _('无效的主加速引擎');
+				: _('Motor principal no válido');
 	};
 
 	if (showFlowOffloading) {
-		o = s.taboption('engine', form.Flag, 'fastpath_fo_hw', _('启用硬件流量分载'),
-			_('硬件支持时可开启。'));
+		o = s.taboption('engine', form.Flag, 'fastpath_fo_hw', _('Habilitar descarga por hardware'),
+			_('Activar si el hardware lo soporta.'));
 		o.default = o.disabled;
 		o.rmempty = false;
 		o.depends('fastpath', 'flow_offloading');
 	}
 
 	if (showFastClassifier) {
-		o = s.taboption('engine', form.Flag, 'fastpath_fc_br', _('启用桥接加速'),
-			_('可能影响桥接 VPN。'));
+		o = s.taboption('engine', form.Flag, 'fastpath_fc_br', _('Habilitar aceleración de puente'),
+			_('Puede afectar a VPN en modo puente.'));
 		o.default = o.disabled;
 		o.rmempty = false;
 		o.depends('fastpath', 'fast_classifier');
 
 		if (features.hasIPV6) {
-			o = s.taboption('engine', form.Flag, 'fastpath_fc_ipv6', _('为 Fast classifier 打开 IPv6'),
-				_('启用 IPv6 加速。'));
+			o = s.taboption('engine', form.Flag, 'fastpath_fc_ipv6', _('Activar IPv6 para Fast classifier'),
+				_('Habilitar aceleración IPv6.'));
 			o.default = o.disabled;
 			o.rmempty = false;
 			o.depends('fastpath', 'fast_classifier');
 		}
 	}
 
-	o = s.taboption('experience', form.ListValue, 'fullcone', _('全锥形 NAT'),
-		_('游戏或 P2P 需要时开启。'));
-	o.value('0', _('禁用'));
+	o = s.taboption('experience', form.ListValue, 'fullcone', _('Full Cone NAT'),
+		_('Activar si lo requieren juegos o P2P.'));
+	o.value('0', _('Deshabilitar'));
 	if (features.hasXTFULLCONENAT || config.fullcone === '1')
 		o.value('1', _('XT_FULLCONE_NAT'));
 	o.value('2', _('Boardcom_FULLCONE_NAT'));
@@ -1181,8 +1181,8 @@ function buildForm(features, config) {
 	if (tcpccaOptions.indexOf(config.tcpcca) < 0)
 		tcpccaOptions.push(config.tcpcca);
 
-	o = s.taboption('experience', form.ListValue, 'tcpcca', _('TCP 拥塞控制算法'),
-		_('选择 TCP 拥塞控制算法。BBR 适合高带宽链路，CUBIC 为内核默认，Reno 兼容性最佳。'));
+	o = s.taboption('experience', form.ListValue, 'tcpcca', _('Algoritmo de congestión TCP'),
+		_('Elige algoritmo TCP: BBR para alto ancho de banda, CUBIC por defecto, Reno para compatibilidad.'));
 	tcpccaOptions.forEach(function(item) {
 		var label;
 		switch (String(item).toLowerCase()) {
@@ -1205,24 +1205,24 @@ function buildForm(features, config) {
 	o.rmempty = false;
 
 	if (showMediatekHnat) {
-		o = s.taboption('hnat', form.Flag, 'fastpath_mh_eth_hnat', _('启用有线 HNAT'),
-			_('启用 MediaTek HNAT hook_toggle；保存并应用后由 turboacc 服务写入内核开关。'));
+		o = s.taboption('hnat', form.Flag, 'fastpath_mh_eth_hnat', _('Habilitar HNAT cableado'),
+			_('Activa hook_toggle de MediaTek HNAT al guardar y aplicar.'));
 		o.validate = function(section, value) {
 			return !features.eqosActive || value === '1' ||
-				_('EQoS 正在使用 HNAT，请先关闭 EQoS 限速服务。');
+				_('EQoS está usando HNAT; desactiva primero el servicio EQoS.');
 		};
 		o.default = o.enabled;
 		o.rmempty = false;
 		o.depends('fastpath', 'mediatek_hnat');
 
-		o = s.taboption('hnat', form.Flag, 'fastpath_mh_eth_hnat_v6', _('启用有线 IPv6 HNAT'),
-			_('启用 IPv6 HNAT。'));
+		o = s.taboption('hnat', form.Flag, 'fastpath_mh_eth_hnat_v6', _('Habilitar HNAT IPv6 cableado'),
+			_('Habilitar HNAT para IPv6.'));
 		o.default = o.enabled;
 		o.rmempty = false;
 		o.depends({ fastpath: 'mediatek_hnat', fastpath_mh_eth_hnat: '1' });
 
-		o = s.taboption('hnat', form.Value, 'fastpath_mh_eth_hnat_bind_rate', _('HNAT 绑定速率阈值（pps）'),
-			_('默认 30。'));
+		o = s.taboption('hnat', form.Value, 'fastpath_mh_eth_hnat_bind_rate', _('Umbral de enlace HNAT (pps)'),
+			_('Por defecto 30.'));
 		o.optional = true;
 		o.datatype = 'range(1,30)';
 		o.placeholder = '30';

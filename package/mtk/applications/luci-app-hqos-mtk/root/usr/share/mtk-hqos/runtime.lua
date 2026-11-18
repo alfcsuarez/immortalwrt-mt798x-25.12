@@ -24,7 +24,7 @@ end
 local function run(arguments, quiet)
 	return os.execute(command(arguments) .. (quiet == false and "" or " >/dev/null 2>&1")) == 0
 end
-local function must(arguments) if not run(arguments) then fail("命令执行失败：" .. tostring(arguments[1])) end end
+local function must(arguments) if not run(arguments) then fail("Error al ejecutar el comando: " .. tostring(arguments[1])) end end
 local function capture(arguments, limit)
 	local pipe = io.popen(command(arguments) .. " 2>/dev/null", "r")
 	if not pipe then return nil end
@@ -33,28 +33,28 @@ local function capture(arguments, limit)
 	return result
 end
 local function mkdir()
-	if not fs.stat(STATE) then assert(fs.mkdir(STATE, 448), "无法创建状态目录") end
-	assert(fs.chmod(STATE, 448), "无法保护状态目录")
+	if not fs.stat(STATE) then assert(fs.mkdir(STATE, 448), "No se pudo crear el directorio de estado") end
+	assert(fs.chmod(STATE, 448), "No se pudo proteger el directorio de estado")
 end
 local function atomic(path, content)
 	local temporary = path .. "." .. nixio.getpid()
-	local file = assert(io.open(temporary, "w"), "无法写入运行状态")
+	local file = assert(io.open(temporary, "w"), "No se pudo escribir el estado de ejecución")
 	local ok = file:write(content); local closed = file:close()
-	if not ok or not closed then fs.unlink(temporary); fail("无法保存运行状态") end
+	if not ok or not closed then fs.unlink(temporary); fail("No se pudo guardar el estado de ejecución") end
 	fs.chmod(temporary, 384)
-	assert(fs.rename(temporary, path), "无法发布运行状态")
+	assert(fs.rename(temporary, path), "No se pudo publicar el estado de ejecución")
 end
 local function decode(path) return json.parse(read(path, 1048576) or "") end
 local function save(path, data)
 	local encoded = assert(json.stringify(data))
-	if #encoded > 1048576 then fail("运行状态超过 1 MiB，无法安全保存") end
+	if #encoded > 1048576 then fail("El estado supera 1 MiB; no se puede guardar de forma segura") end
 	atomic(path, encoded)
 end
 local function write(node, value)
 	local file = io.open(HNAT .. "/" .. node, "w")
-	if not file then fail("无法写入 HNAT 接口 " .. node) end
+	if not file then fail("No se pudo escribir en la interfaz HNAT " .. node) end
 	local ok = file:write(value); local closed = file:close()
-	if not ok or not closed then fail("HNAT 拒绝配置 " .. node) end
+	if not ok or not closed then fail("HNAT rechazó la configuración " .. node) end
 end
 local function qos_status()
 	local out = {}
@@ -105,7 +105,7 @@ end
 local function resolve(config)
 	local result = { lan = {}, wan = {}, hosts = {} }
 	local function network(name, into)
-		if not name:match("^[%w_-]+$") or #name > 32 then fail("网络名称无效") end
+		if not name:match("^[%w_-]+$") or #name > 32 then fail("Nombre de red no válido") end
 		local data = json.parse(capture({ "/bin/ubus", "call", "network.interface." .. name, "status" }) or "")
 		if data and data.up and (data.l3_device or data.device) then into[data.l3_device or data.device] = true end
 	end
@@ -152,7 +152,7 @@ local function expected(plan, baseline)
 	local originals = {}; for _, item in ipairs(baseline.queues) do originals[item.id] = item end
 	for _, target in ipairs(plan.queues) do
 		local old = originals[target.id]
-		if not old then fail("队列布局发生变化，请先停止服务") end
+		if not old then fail("El diseño de colas cambió; detén el servicio primero") end
 		result.queues[#result.queues + 1] = { id = target.id, direction = target.direction, scheduler = target.scheduler, min_enable = 0, min_rate = 0, max_enable = target.rate > 0 and 1 or 0, rate = quantize(target.rate), weight = 4, hw_resv = math.max(4, old.hw_resv), sw_resv = math.max(4, old.sw_resv) }
 	end
 	for _, target in ipairs(plan.schedulers) do result.schedulers[#result.schedulers + 1] = { id = target.id, enable = target.rate > 0 and 1 or 0, rate = quantize(target.rate), mode = "wrr" } end
@@ -164,29 +164,29 @@ end
 local function hardware_verify(state)
 	local expected_state = state.expected or {}
 	local status = qos_status()
-	if state.plan.control and (status.mode ~= expected_state.mode or status.packet_owned ~= 1 or status.dscp_mapping ~= 0) then return nil, "HNAT QoS 模式已被其他服务修改" end
-	for _, target in ipairs(expected_state.queues or {}) do if not same_queue(queue(target.id), target) then return nil, "硬件队列配置发生变化：" .. target.id end end
+	if state.plan.control and (status.mode ~= expected_state.mode or status.packet_owned ~= 1 or status.dscp_mapping ~= 0) then return nil, "El modo HNAT QoS fue modificado por otro servicio" end
+	for _, target in ipairs(expected_state.queues or {}) do if not same_queue(queue(target.id), target) then return nil, "Cambió la configuración de la cola hardware: " .. target.id end end
 	for _, target in ipairs(expected_state.schedulers or {}) do
 		local current = scheduler(target.id)
-		if not current or sargs(current) ~= sargs(target) then return nil, "硬件调度器配置发生变化：" .. target.id end
+		if not current or sargs(current) ~= sargs(target) then return nil, "Cambió la configuración del planificador hardware: " .. target.id end
 	end
 	return true
 end
 local function verify(state)
 	local ok, message = hardware_verify(state)
 	if not ok then return nil, message end
-	if state.plan.control and trim(read(HNAT .. "/hook_toggle")) ~= "enabled" then return nil, "HNAT 已关闭" end
+	if state.plan.control and trim(read(HNAT .. "/hook_toggle")) ~= "enabled" then return nil, "HNAT está desactivado" end
 	if state.plan.software then
 		local owned = decode(STATE .. "/tc.json")
-		if not owned or not fs.stat("/sys/class/net/" .. IFB) then return nil, "软件整形接口不可用" end
+		if not owned or not fs.stat("/sys/class/net/" .. IFB) then return nil, "Interfaz de moldeado por software no disponible" end
 	end
-	if not run({ "/usr/sbin/nft", "list", "table", "inet", "mtk_hqos" }) then return nil, "限速标记规则不可用" end
+	if not run({ "/usr/sbin/nft", "list", "table", "inet", "mtk_hqos" }) then return nil, "Reglas de marcado de límite no disponibles" end
 	return true
 end
 local function nft_apply(text)
 	local exists = run({ "/usr/sbin/nft", "list", "table", "inet", "mtk_hqos" })
 	atomic(STATE .. "/pending.nft", (exists and "delete table inet mtk_hqos\n" or "") .. text)
-	if not run({ "/usr/sbin/nft", "-c", "-f", STATE .. "/pending.nft" }) then fail("nftables 规则校验失败") end
+	if not run({ "/usr/sbin/nft", "-c", "-f", STATE .. "/pending.nft" }) then fail("Falló la validación de reglas nftables") end
 	must({ "/usr/sbin/nft", "-f", STATE .. "/pending.nft" })
 end
 local function tc_exists(dev, needle)
@@ -209,10 +209,10 @@ local function tc_apply(plan)
 	local dev = plan.lan[1]
 	local current = capture({ "/sbin/tc", "qdisc", "show", "dev", dev }) or ""
 	for line in current:gmatch("[^\n]+") do
-		if line:find(" root ", 1, true) and not line:match("^qdisc noqueue ") and not line:match("^qdisc noop ") then fail("LAN 接口已有其他整形服务") end
+		if line:find(" root ", 1, true) and not line:match("^qdisc noqueue ") and not line:match("^qdisc noop ") then fail("La interfaz LAN ya tiene otro servicio de moldeado") end
 	end
-	if current:find(" ingress ", 1, true) or current:find(" clsact ", 1, true) then fail("LAN 接口已有入口整形服务") end
-	if fs.stat("/sys/class/net/" .. IFB) then fail("软件回退接口已被占用") end
+	if current:find(" ingress ", 1, true) or current:find(" clsact ", 1, true) then fail("La interfaz LAN ya tiene moldeado de entrada") end
+	if fs.stat("/sys/class/net/" .. IFB) then fail("La interfaz de respaldo por software ya está en uso") end
 	local owned = { dev = dev }; save(STATE .. "/tc.json", owned)
 	must({ "/sbin/ip", "link", "add", IFB, "type", "ifb" }); owned.ifb = true; save(STATE .. "/tc.json", owned)
 	must({ "/sbin/ip", "link", "set", "dev", IFB, "up" })
@@ -238,7 +238,7 @@ local function tc_apply(plan)
 					local protocols = #rule.protocols > 0 and rule.protocols or { false }
 					local fields = rule.port_side == "any" and { "src_port", "dst_port" } or { ((rule.port_side == "remote") == (direction == "up")) and "dst_port" or "src_port" }
 					for _, port in ipairs(ports) do for _, protocol in ipairs(protocols) do for _, field in ipairs(fields) do
-						filters = filters + 1; if filters > 1024 then fail("软件限速过滤器超过 1024 条") end
+						filters = filters + 1; if filters > 1024 then fail("Los filtros por software superan los 1024") end
 						local args = { "/sbin/tc", "filter", "add", "dev", target, "parent", HANDLE, "protocol", address.family == "ip" and "ip" or "ipv6", "pref", tostring(index + 10), "flower", "skip_hw" }
 						if address.value then args[#args + 1] = direction == "up" and "src_ip" or "dst_ip"; args[#args + 1] = address.value end
 						if address.mac then args[#args + 1] = "src_mac"; args[#args + 1] = address.mac end
@@ -276,16 +276,16 @@ function M.stop()
 	local baseline = decode(STATE .. "/baseline.json")
 	local previous = decode(STATE .. "/state.json")
 	if not baseline then
-		if previous or fs.access(STATE .. "/tc.json") then fail("缺少原始配置快照，无法安全清理") end
+		if previous or fs.access(STATE .. "/tc.json") then fail("Falta la instantánea original; no se puede limpiar con seguridad") end
 		fs.unlink(STATE .. "/error"); fs.unlink(STATE .. "/pending.nft")
 		return true
 	end
 	if previous and not fs.access(STATE .. "/applying") then
 		local ok, message = hardware_verify(previous)
-		if not ok then fail(message .. "，拒绝覆盖其他服务的配置") end
+		if not ok then fail(message .. "; se rechaza sobrescribir la configuración de otro servicio") end
 	end
 	local mode = qos_status().mode
-	if baseline.control and mode ~= 1 and mode ~= baseline.mode then fail("QoS 模式已被其他服务接管，拒绝覆盖") end
+	if baseline.control and mode ~= 1 and mode ~= baseline.mode then fail("El modo QoS fue tomado por otro servicio; se rechaza sobrescribir") end
 	tc_stop()
 	if run({ "/usr/sbin/nft", "list", "table", "inet", "mtk_hqos" }) then must({ "/usr/sbin/nft", "delete", "table", "inet", "mtk_hqos" }) end
 	baseline_restore(baseline)
@@ -301,12 +301,12 @@ function M.apply(refresh)
 	local previous = decode(STATE .. "/state.json")
 	local baseline = decode(STATE .. "/baseline.json")
 	local current = caps()
-	if previous and previous.plan.control and not current.hnat_enabled then fail("HNAT 已关闭，请恢复加速引擎后重试") end
-	if not baseline and fs.access("/var/run/eqos.active") then fail("请先停止旧 EQoS 服务") end
-	if not baseline and current.mode == 1 then fail("QDMA 已被其他 HQoS 服务占用") end
-	if current.dscp == 1 then fail("请先关闭 DSCP 队列映射") end
+	if previous and previous.plan.control and not current.hnat_enabled then fail("HNAT está desactivado; reactiva el motor de aceleración e inténtalo de nuevo") end
+	if not baseline and fs.access("/var/run/eqos.active") then fail("Detén primero el servicio EQoS anterior") end
+	if not baseline and current.mode == 1 then fail("QDMA ya está ocupado por otro servicio HQoS") end
+	if current.dscp == 1 then fail("Desactiva primero el mapeo DSCP a colas") end
 	if baseline and not baseline.control and current.hnat_enabled then
-		if not current.control or (current.mode ~= 0 and current.mode ~= 2) then fail("新启用的 HNAT 尚未就绪或已被其他服务接管") end
+		if not current.control or (current.mode ~= 0 and current.mode ~= 2) then fail("El nuevo HNAT aún no está listo o lo ocupa otro servicio") end
 		baseline = { mode = current.mode, queues = current.queues, schedulers = current.schedulers, control = true }
 		save(STATE .. "/baseline.json", baseline)
 	end
@@ -318,7 +318,7 @@ function M.apply(refresh)
 	local plan = core.plan(config, planning, resolve(config))
 	if #plan.rules == 0 and plan.total_up == 0 and plan.total_down == 0 then return M.stop() end
 	uci:foreach("firewall", "defaults", function(section)
-		if core.enabled(section.flow_offloading) or core.enabled(section.flow_offloading_hw) then fail("请关闭防火墙流量分载，避免绕过限速标记；MediaTek HNAT 可保持开启") end
+		if core.enabled(section.flow_offloading) or core.enabled(section.flow_offloading_hw) then fail("Desactiva Flow Offloading del cortafuegos para no omitir las marcas de QoS; MediaTek HNAT puede seguir activo") end
 	end)
 	local fingerprint = core.nft(plan) .. "\n" .. plan.lan[1]
 	for _, rule in ipairs(plan.rules) do fingerprint = fingerprint .. "\n" .. rule.id .. ":" .. rule.path .. ":" .. rule.download .. ":" .. rule.upload end
@@ -332,15 +332,15 @@ function M.apply(refresh)
 		fs.unlink(STATE .. "/error")
 		return true
 	end
-	if not baseline and run({ "/usr/sbin/nft", "list", "table", "inet", "mtk_hqos" }) then fail("同名 nftables 表不属于本服务") end
+	if not baseline and run({ "/usr/sbin/nft", "list", "table", "inet", "mtk_hqos" }) then fail("La tabla nftables homónima no pertenece a este servicio") end
 	if baseline and previous and not fs.access(STATE .. "/applying") then
 		local ok, message = hardware_verify(previous)
-		if not ok then fail(message .. "，请先停止服务后重试") end
+		if not ok then fail(message .. "; detén el servicio primero e inténtalo de nuevo") end
 	end
 	if not baseline then
-		if current.hnat_enabled and not current.control then fail("请更新支持 HQoS 控制接口的 HNAT 模块") end
+		if current.hnat_enabled and not current.control then fail("Actualiza el módulo HNAT con soporte para la interfaz de control HQoS") end
 		baseline = { mode = current.mode, queues = current.queues, schedulers = current.schedulers, control = current.control and current.hnat_enabled }
-		if baseline.control and baseline.mode ~= 0 and baseline.mode ~= 2 then fail("HNAT QoS 状态无效") end
+		if baseline.control and baseline.mode ~= 0 and baseline.mode ~= 2 then fail("Estado de HNAT QoS no válido") end
 		save(STATE .. "/baseline.json", baseline)
 	end
 	local mutated = false
@@ -349,7 +349,7 @@ function M.apply(refresh)
 		-- nft -c runs before the first mutable TC/QDMA operation.
 		local exists = run({ "/usr/sbin/nft", "list", "table", "inet", "mtk_hqos" })
 		atomic(STATE .. "/pending.nft", (exists and "delete table inet mtk_hqos\n" or "") .. ruleset)
-		if not run({ "/usr/sbin/nft", "-c", "-f", STATE .. "/pending.nft" }) then fail("nftables 规则校验失败") end
+		if not run({ "/usr/sbin/nft", "-c", "-f", STATE .. "/pending.nft" }) then fail("Falló la validación de reglas nftables") end
 		atomic(STATE .. "/applying", "1\n")
 		mutated = true
 		tc_apply(plan)
@@ -381,7 +381,7 @@ function M.apply(refresh)
 			fs.unlink(STATE .. "/applying")
 		else M.stop() end
 	end)
-	if not restored then fs.unlink(STATE .. "/active"); result = tostring(result) .. "；回滚未完成，请停止服务重试" end
+	if not restored then fs.unlink(STATE .. "/active"); result = tostring(result) .. "; reversión incompleta, detén el servicio e inténtalo de nuevo" end
 	fail(result)
 end
 function M.status()
@@ -393,7 +393,7 @@ function M.status()
 	local result = { schema = 1, enabled = core.enabled(config.global.enabled), applied = valid == true and fs.access(STATE .. "/active") or false, owned = fs.access(STATE .. "/baseline.json") or false, hnat = hardware.hnat_enabled, available = hardware.usable, total_queues = #hardware.queues, queue_mask = hardware.queue_mask, queues = {}, rules = {}, error = trim(read(STATE .. "/error", 1024)) }
 	if state then
 		result.applied_at = state.applied_at
-		if not valid and result.error == "" then result.error = message or "状态校验失败" end
+		if not valid and result.error == "" then result.error = message or "Falló la verificación de estado" end
 		for _, rule in ipairs(state.plan.rules) do
 			result.rules[#result.rules + 1] = { id = rule.id, name = rule.name, path = rule.path, up_qid = rule.up_qid, down_qid = rule.down_qid, pending_address = rule.mac ~= nil and #rule.addresses == 0, upload = rule.upload, download = rule.download }
 		end
@@ -420,7 +420,7 @@ function M.migrate()
 		if backup and not fs.stat("/etc/config/mtk-hqos.eqos-backup") then atomic("/etc/config/mtk-hqos.eqos-backup", backup) end
 		-- A live old backend owns its snapshot; never guess at those registers.
 		if fs.access("/var/run/eqos/mode") or fs.access("/var/run/eqos.active") then
-			if not run({ "/etc/init.d/eqos", "stop" }) then fail("请先停止旧 EQoS，再完成配置迁移") end
+			if not run({ "/etc/init.d/eqos", "stop" }) then fail("Detén primero el antiguo EQoS antes de migrar la configuración") end
 		end
 		for _, key in ipairs({ "enabled", "download", "upload" }) do uci:set("mtk-hqos", "global", key, old[key] or "0") end
 		uci:foreach("eqos", "device", function(source)
@@ -436,7 +436,7 @@ function M.migrate()
 		end)
 	end
 	uci:set("mtk-hqos", "global", "migrated", "1")
-	uci:save("mtk-hqos"); assert(uci:commit("mtk-hqos"), "无法保存迁移配置")
+	uci:save("mtk-hqos"); assert(uci:commit("mtk-hqos"), "No se pudo guardar la configuración migrada")
 	return true
 end
 M.paths = { hnat = HNAT, state = STATE }
