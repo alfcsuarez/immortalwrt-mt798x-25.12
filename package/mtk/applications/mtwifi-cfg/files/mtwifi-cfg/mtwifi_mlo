@@ -151,9 +151,9 @@ end
 
 local function save_state(state)
 	if not fs.stat(STATE_DIR) then
-		if not fs.mkdir(STATE_DIR, 448) then return false end -- 0700
+		if not fs.mkdir(STATE_DIR, "0700") then return false end -- 0700
 	end
-	if fs.chmod and not fs.chmod(STATE_DIR, 448) then return false end -- 0700
+	if fs.chmod and not fs.chmod(STATE_DIR, "0700") then return false end -- 0700
 	local tmp = STATE_FILE .. ".tmp." .. tostring(nixio.getpid())
 	local flags = nixio.open_flags("wronly", "creat", "excl", "sync")
 	local file = nixio.open(tmp, flags, "0600") -- 0600
@@ -163,7 +163,7 @@ local function save_state(state)
 	local synced = written == #data and file:sync()
 	file:close()
 	if not synced then os.remove(tmp); return false end
-	if fs.chmod and not fs.chmod(tmp, 384) then os.remove(tmp); return false end -- 0600
+	if fs.chmod and not fs.chmod(tmp, "0600") then os.remove(tmp); return false end -- 0600
 	if not os.rename(tmp, STATE_FILE) then os.remove(tmp); return false end
 	local dir = nixio.open(STATE_DIR, "r")
 	if not dir then return false end

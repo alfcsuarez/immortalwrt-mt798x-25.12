@@ -33,15 +33,15 @@ local function capture(arguments, limit)
 	return result
 end
 local function mkdir()
-	if not fs.stat(STATE) then assert(fs.mkdir(STATE, 448), "No se pudo crear el directorio de estado") end
-	assert(fs.chmod(STATE, 448), "No se pudo proteger el directorio de estado")
+	if not fs.stat(STATE) then assert(fs.mkdir(STATE, "0700"), "No se pudo crear el directorio de estado") end
+	assert(fs.chmod(STATE, "0700"), "No se pudo proteger el directorio de estado")
 end
 local function atomic(path, content)
 	local temporary = path .. "." .. nixio.getpid()
 	local file = assert(io.open(temporary, "w"), "No se pudo escribir el estado de ejecución")
 	local ok = file:write(content); local closed = file:close()
 	if not ok or not closed then fs.unlink(temporary); fail("No se pudo guardar el estado de ejecución") end
-	fs.chmod(temporary, 384)
+	fs.chmod(temporary, "0600")
 	assert(fs.rename(temporary, path), "No se pudo publicar el estado de ejecución")
 end
 local function decode(path) return json.parse(read(path, 1048576) or "") end
